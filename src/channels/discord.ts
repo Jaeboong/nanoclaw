@@ -340,7 +340,9 @@ export class DiscordChannel implements Channel {
   async sendStatus(jid: string, text: string): Promise<void> {
     if (!this.client) return;
 
-    const formatted = `🤔 *${text}*`.slice(0, 2000);
+    // Tool-use status already carries its own leading emoji (📖/⚡/🔍/…).
+    // Italic keeps the "live progress" feel without duplicating the emoji.
+    const formatted = `*${text}*`.slice(0, 2000);
 
     try {
       const channelId = jid.replace(/^dc:/, '');

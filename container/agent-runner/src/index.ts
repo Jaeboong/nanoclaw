@@ -92,13 +92,73 @@ function writeStatusIpc(
   }
 }
 
-function formatThinkingSummary(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const firstPara = trimmed.split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
-  if (!firstPara) return null;
-  if (firstPara.length <= STATUS_MAX_CHARS) return firstPara;
-  return firstPara.slice(0, STATUS_MAX_CHARS - 1).replace(/\s+\S*$/, '') + '…';
+function shortenForStatus(raw: unknown, max: number): string {
+  if (typeof raw !== 'string') return '';
+  const normalized = raw.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= max) return normalized;
+  return normalized.slice(0, max - 1) + '…';
+}
+
+function tailPath(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const parts = raw.split('/').filter(Boolean);
+  return parts.length > 1 ? parts.slice(-2).join('/') : parts[0] ?? raw;
+}
+
+function withTarget(emoji: string, verb: string, target: string): string {
+  return target ? `${emoji} ${target} ${verb}...` : `${emoji} ${verb}...`;
+}
+
+function formatToolUseStatus(block: unknown): string | null {
+  if (!block || typeof block !== 'object') return null;
+  const b = block as { name?: string; input?: Record<string, unknown> };
+  if (typeof b.name !== 'string') return null;
+  const input = b.input ?? {};
+
+  switch (b.name) {
+    case 'Read':
+      return withTarget('📖', '읽는 중', tailPath(input.file_path));
+    case 'Write':
+      return withTarget('✏️', '쓰는 중', tailPath(input.file_path));
+    case 'Edit':
+      return withTarget('✏️', '편집 중', tailPath(input.file_path));
+    case 'Bash':
+      return withTarget('⚡', '실행 중', shortenForStatus(input.command, 80));
+    case 'Glob':
+      return withTarget('🔍', '찾는 중', shortenForStatus(input.pattern, 60));
+    case 'Grep':
+      return withTarget('🔍', '검색 중', shortenForStatus(input.pattern, 60));
+    case 'WebSearch':
+      return withTarget(
+        '🌐',
+        '웹 검색 중',
+        shortenForStatus(input.query, 60),
+      );
+    case 'WebFetch':
+      return withTarget(
+        '🌐',
+        '웹 가져오는 중',
+        shortenForStatus(input.url, 60),
+      );
+    case 'TodoWrite':
+      return '📋 할 일 정리 중...';
+    case 'Task': {
+      const desc =
+        typeof input.description === 'string'
+          ? input.description
+          : typeof input.subagent_type === 'string'
+            ? input.subagent_type
+            : '';
+      return withTarget('🤖', '서브에이전트 실행 중', shortenForStatus(desc, 60));
+    }
+    case 'NotebookEdit':
+      return withTarget('📓', '노트북 편집 중', tailPath(input.notebook_path));
+    default:
+      // Skip MCP tools — includes send_message which is the final delivery
+      // and would flicker in the status line immediately before being cleared.
+      if (b.name.startsWith('mcp__')) return null;
+      return `🔧 ${b.name} 실행 중...`;
+  }
 }
 
 /**
@@ -557,9 +617,9 @@ async function runQuery(
       lastAssistantUuid = (message as { uuid: string }).uuid;
     }
 
-    // Surface extended-thinking chunks as Discord status updates.
-    // Only effective when /effort is enabled on the channel; otherwise
-    // the SDK emits no thinking blocks and this loop is inert.
+    // Surface tool calls as live Discord status updates (edit-in-place).
+    // Opus 4.7 returns thinking blocks with empty plaintext (signature only),
+    // so we key off tool_use blocks instead — these are always visible.
     if (message.type === 'assistant') {
       const content = (message as { message?: { content?: unknown[] } }).message
         ?.content;
@@ -568,18 +628,15 @@ async function runQuery(
           if (
             block &&
             typeof block === 'object' &&
-            (block as { type?: string }).type === 'thinking'
+            (block as { type?: string }).type === 'tool_use'
           ) {
-            const raw = (block as { thinking?: string }).thinking;
-            if (typeof raw === 'string') {
-              const summary = formatThinkingSummary(raw);
-              if (summary) {
-                writeStatusIpc(
-                  containerInput.chatJid,
-                  containerInput.groupFolder,
-                  summary,
-                );
-              }
+            const status = formatToolUseStatus(block);
+            if (status) {
+              writeStatusIpc(
+                containerInput.chatJid,
+                containerInput.groupFolder,
+                status,
+              );
             }
           }
         }
