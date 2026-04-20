@@ -3,6 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
+import { rejectionSummary, resolveAttachmentPaths } from './attachment-paths.js';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -11,7 +12,7 @@ import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, files?: string[]) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -81,9 +82,42 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  // Translate container attachment paths to host paths.
+                  // Rejected files (too large, out of scope, etc.) are
+                  // surfaced to the user as a Korean notice appended to
+                  // the message text — never silently dropped.
+                  let hostFiles: string[] | undefined;
+                  let outboundText: string = data.text;
+                  if (Array.isArray(data.files) && data.files.length > 0) {
+                    const sourceGroupEntry = Object.values(
+                      registeredGroups,
+                    ).find((g) => g.folder === sourceGroup);
+                    if (sourceGroupEntry) {
+                      const batch = resolveAttachmentPaths(
+                        data.files.filter(
+                          (f: unknown): f is string => typeof f === 'string',
+                        ),
+                        sourceGroupEntry,
+                      );
+                      hostFiles =
+                        batch.resolved.length > 0 ? batch.resolved : undefined;
+                      if (batch.rejections.length > 0) {
+                        const lines = batch.rejections
+                          .map((r) => `• ${rejectionSummary(r)}`)
+                          .join('\n');
+                        outboundText =
+                          (outboundText ? outboundText + '\n\n' : '') +
+                          `⚠️ 첨부 전송 실패:\n${lines}`;
+                      }
+                    }
+                  }
+                  await deps.sendMessage(data.chatJid, outboundText, hostFiles);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      fileCount: hostFiles?.length ?? 0,
+                    },
                     'IPC message sent',
                   );
                 } else {

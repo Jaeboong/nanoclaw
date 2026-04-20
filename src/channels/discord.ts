@@ -1,8 +1,19 @@
-import { Client, Events, GatewayIntentBits, Message, TextChannel } from 'discord.js';
+import {
+  AttachmentBuilder,
+  Client,
+  Events,
+  GatewayIntentBits,
+  Message,
+  TextChannel,
+} from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import {
+  formatAttachmentReference,
+  saveAttachment,
+} from './discord-attachments.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -86,27 +97,6 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
-      if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map((att) => {
-          const contentType = att.contentType || '';
-          if (contentType.startsWith('image/')) {
-            return `[Image: ${att.name || 'image'}]`;
-          } else if (contentType.startsWith('video/')) {
-            return `[Video: ${att.name || 'video'}]`;
-          } else if (contentType.startsWith('audio/')) {
-            return `[Audio: ${att.name || 'audio'}]`;
-          } else {
-            return `[File: ${att.name || 'file'}]`;
-          }
-        });
-        if (content) {
-          content = `${content}\n${attachmentDescriptions.join('\n')}`;
-        } else {
-          content = attachmentDescriptions.join('\n');
-        }
-      }
-
       // Handle reply context — include who the user is replying to
       if (message.reference?.messageId) {
         try {
@@ -135,6 +125,34 @@ export class DiscordChannel implements Channel {
           'Message from unregistered Discord channel',
         );
         return;
+      }
+
+      // Download attachments to group inbox so the agent can read them.
+      // Only registered groups — avoids filling disk with uninvited files.
+      if (message.attachments.size > 0) {
+        const results = await Promise.all(
+          [...message.attachments.values()].map((att) =>
+            saveAttachment(
+              {
+                url: att.url,
+                name: att.name,
+                size: att.size,
+                contentType: att.contentType,
+              },
+              group.folder,
+            ),
+          ),
+        );
+        const refs = results
+          .filter((r): r is NonNullable<typeof r> => r !== null)
+          .map(formatAttachmentReference);
+        if (refs.length > 0) {
+          content = content ? `${content}\n${refs.join('\n')}` : refs.join('\n');
+        }
+        const dropped = results.filter((r) => r === null).length;
+        if (dropped > 0) {
+          content = `${content}\n[${dropped} attachment(s) could not be saved]`.trim();
+        }
       }
 
       // Deliver message — startMessageLoop() will pick it up
@@ -176,7 +194,11 @@ export class DiscordChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+    files?: string[],
+  ): Promise<void> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
       return;
@@ -192,17 +214,28 @@ export class DiscordChannel implements Channel {
       }
 
       const textChannel = channel as TextChannel;
+      const attachments =
+        files && files.length > 0
+          ? files.map((f) => new AttachmentBuilder(f))
+          : undefined;
 
-      // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
       if (text.length <= MAX_LENGTH) {
-        await textChannel.send(text);
+        await textChannel.send({ content: text || undefined, files: attachments });
       } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        // Attach files to the first chunk only; remainder is text-only.
+        await textChannel.send({
+          content: text.slice(0, MAX_LENGTH),
+          files: attachments,
+        });
+        for (let i = MAX_LENGTH; i < text.length; i += MAX_LENGTH) {
           await textChannel.send(text.slice(i, i + MAX_LENGTH));
         }
       }
-      logger.info({ jid, length: text.length }, 'Discord message sent');
+      logger.info(
+        { jid, length: text.length, fileCount: attachments?.length ?? 0 },
+        'Discord message sent',
+      );
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
     }

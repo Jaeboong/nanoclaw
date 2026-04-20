@@ -12,6 +12,27 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+  DATA_DIR: '/tmp/nanoclaw-test-data',
+}));
+
+// Mock attachment save (tests don't hit Discord CDN)
+vi.mock('./discord-attachments.js', () => ({
+  saveAttachment: vi.fn(async (att: { name: string | null; size: number; contentType: string | null }) => ({
+    hostPath: `/tmp/fake-host/${att.name ?? 'file'}`,
+    containerPath: `/workspace/group/inbox/stamp-${att.name ?? 'file'}`,
+    originalName: att.name ?? 'file',
+    size: att.size,
+    contentType: att.contentType,
+  })),
+  formatAttachmentReference: (s: { contentType: string | null; originalName: string }) => {
+    const ct = s.contentType ?? '';
+    let kind = 'File';
+    if (ct.startsWith('image/')) kind = 'Image';
+    else if (ct.startsWith('video/')) kind = 'Video';
+    else if (ct.startsWith('audio/')) kind = 'Audio';
+    return `[${kind}: ${s.originalName}]`;
+  },
 }));
 
 // Mock logger
@@ -695,7 +716,10 @@ describe('DiscordChannel', () => {
       await channel.sendMessage('dc:1234567890123456', longText);
 
       expect(mockChannel.send).toHaveBeenCalledTimes(2);
-      expect(mockChannel.send).toHaveBeenNthCalledWith(1, 'x'.repeat(2000));
+      expect(mockChannel.send).toHaveBeenNthCalledWith(1, {
+        content: 'x'.repeat(2000),
+        files: undefined,
+      });
       expect(mockChannel.send).toHaveBeenNthCalledWith(2, 'x'.repeat(1000));
     });
   });

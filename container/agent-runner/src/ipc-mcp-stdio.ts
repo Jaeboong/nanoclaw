@@ -41,7 +41,11 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  `Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.
+
+To attach files (images, documents, screenshots), pass absolute container paths under a mounted directory — typically /workspace/group (your group folder), /workspace/extra/<name> (additionalMounts), or a file you just wrote there. Files outside these roots are rejected by the host. Channels that don't support attachments silently drop them.
+
+Channel limits: Discord allows up to 10 files per message, 25 MB each (free tier).`,
   {
     text: z.string().describe('The message text to send'),
     sender: z
@@ -50,9 +54,15 @@ server.tool(
       .describe(
         'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
       ),
+    files: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Optional absolute container paths to attach (e.g. ["/workspace/group/screenshot.png"]). Must be regular files under a mounted directory.',
+      ),
   },
   async (args) => {
-    const data: Record<string, string | undefined> = {
+    const data: Record<string, unknown> = {
       type: 'message',
       chatJid,
       text: args.text,
@@ -60,6 +70,9 @@ server.tool(
       groupFolder,
       timestamp: new Date().toISOString(),
     };
+    if (args.files && args.files.length > 0) {
+      data.files = args.files;
+    }
 
     writeIpcFile(MESSAGES_DIR, data);
 
