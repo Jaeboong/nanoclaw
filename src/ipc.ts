@@ -16,6 +16,9 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string, files?: string[]) => Promise<void>;
+  /** Edit-in-place progress line (thinking summary). Channels without
+   * support should return a resolved promise. */
+  sendStatus: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -78,6 +81,24 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'status' && data.chatJid && data.text) {
+                // Authorization: same check as regular messages — source
+                // group must own the target chat, or be main.
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  await deps.sendStatus(data.chatJid, data.text);
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC status attempt blocked',
+                  );
+                }
+                fs.unlinkSync(filePath);
+                continue;
+              }
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];

@@ -46,6 +46,9 @@ export class DiscordChannel implements Channel {
   private client: Client | null = null;
   private opts: DiscordChannelOpts;
   private botToken: string;
+  // jid → status message id currently being edited in place.
+  // Populated by sendStatus, cleared (with delete()) at sendMessage entry.
+  private statusMessages = new Map<string, string>();
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -334,6 +337,51 @@ export class DiscordChannel implements Channel {
     }
   }
 
+  async sendStatus(jid: string, text: string): Promise<void> {
+    if (!this.client) return;
+
+    const formatted = `🤔 *${text}*`.slice(0, 2000);
+
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('send' in channel)) return;
+      const textChannel = channel as TextChannel;
+
+      const existingId = this.statusMessages.get(jid);
+      if (existingId) {
+        try {
+          const existing = await textChannel.messages.fetch(existingId);
+          await existing.edit({ content: formatted });
+          return;
+        } catch {
+          // Message was deleted or missing — fall through to a fresh send.
+          this.statusMessages.delete(jid);
+        }
+      }
+
+      const sent = await textChannel.send({ content: formatted });
+      this.statusMessages.set(jid, sent.id);
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Discord status');
+    }
+  }
+
+  private async clearStatus(
+    jid: string,
+    textChannel: TextChannel,
+  ): Promise<void> {
+    const existingId = this.statusMessages.get(jid);
+    if (!existingId) return;
+    this.statusMessages.delete(jid);
+    try {
+      const existing = await textChannel.messages.fetch(existingId);
+      await existing.delete();
+    } catch {
+      // Already gone — nothing to do.
+    }
+  }
+
   async sendMessage(
     jid: string,
     text: string,
@@ -354,6 +402,7 @@ export class DiscordChannel implements Channel {
       }
 
       const textChannel = channel as TextChannel;
+      await this.clearStatus(jid, textChannel);
       const attachments =
         files && files.length > 0
           ? files.map((f) => new AttachmentBuilder(f))

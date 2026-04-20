@@ -65,6 +65,41 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
+const STATUS_MAX_CHARS = 300;
+
+function writeStatusIpc(
+  chatJid: string,
+  groupFolder: string,
+  text: string,
+): void {
+  try {
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.json`;
+    fs.writeFileSync(
+      path.join(IPC_MESSAGES_DIR, filename),
+      JSON.stringify({
+        type: 'status',
+        chatJid,
+        groupFolder,
+        text,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  } catch (err) {
+    console.error(
+      `[agent-runner] Failed to write status IPC: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function formatThinkingSummary(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const firstPara = trimmed.split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
+  if (!firstPara) return null;
+  if (firstPara.length <= STATUS_MAX_CHARS) return firstPara;
+  return firstPara.slice(0, STATUS_MAX_CHARS - 1).replace(/\s+\S*$/, '') + '…';
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -520,6 +555,35 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    // Surface extended-thinking chunks as Discord status updates.
+    // Only effective when /effort is enabled on the channel; otherwise
+    // the SDK emits no thinking blocks and this loop is inert.
+    if (message.type === 'assistant') {
+      const content = (message as { message?: { content?: unknown[] } }).message
+        ?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (
+            block &&
+            typeof block === 'object' &&
+            (block as { type?: string }).type === 'thinking'
+          ) {
+            const raw = (block as { thinking?: string }).thinking;
+            if (typeof raw === 'string') {
+              const summary = formatThinkingSummary(raw);
+              if (summary) {
+                writeStatusIpc(
+                  containerInput.chatJid,
+                  containerInput.groupFolder,
+                  summary,
+                );
+              }
+            }
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
