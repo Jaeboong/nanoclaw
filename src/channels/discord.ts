@@ -3,13 +3,25 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Message,
+  SlashCommandBuilder,
   TextChannel,
+  type Interaction,
 } from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import {
+  DEFAULT_SENTINEL,
+  EFFORT_CHOICES,
+  MODEL_CHOICES,
+  effortLabel,
+  loadRuntimeSettings,
+  modelLabel,
+  updateRuntimeSettings,
+} from '../group-runtime-settings.js';
 import {
   formatAttachmentReference,
   saveAttachment,
@@ -177,8 +189,17 @@ export class DiscordChannel implements Channel {
       logger.error({ err: err.message }, 'Discord client error');
     });
 
+    // Slash command handlers (/model, /effort) — runtime-only, no rebuild needed
+    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+      if (!interaction.isChatInputCommand()) return;
+      if (interaction.commandName !== 'model' && interaction.commandName !== 'effort') {
+        return;
+      }
+      await this.handleRuntimeCommand(interaction);
+    });
+
     return new Promise<void>((resolve) => {
-      this.client!.once(Events.ClientReady, (readyClient) => {
+      this.client!.once(Events.ClientReady, async (readyClient) => {
         logger.info(
           { username: readyClient.user.tag, id: readyClient.user.id },
           'Discord bot connected',
@@ -187,11 +208,112 @@ export class DiscordChannel implements Channel {
         console.log(
           `  Use /chatid command or check channel IDs in Discord settings\n`,
         );
+        try {
+          await this.registerSlashCommands();
+        } catch (err) {
+          logger.error({ err }, 'Failed to register slash commands');
+        }
         resolve();
       });
 
       this.client!.login(this.botToken);
     });
+  }
+
+  private async registerSlashCommands(): Promise<void> {
+    if (!this.client?.application) return;
+    const commands = [
+      new SlashCommandBuilder()
+        .setName('model')
+        .setDescription('이 채널에서 사용할 Claude 모델 확인/변경')
+        .addStringOption((opt) =>
+          opt
+            .setName('choice')
+            .setDescription('사용할 모델 (생략 시 현재 설정 조회)')
+            .setRequired(false)
+            .addChoices(
+              ...MODEL_CHOICES.map((c) => ({ name: c.label, value: c.value })),
+              { name: '기본값 (SDK 기본 모델 사용)', value: DEFAULT_SENTINEL },
+            ),
+        )
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('effort')
+        .setDescription('이 채널의 추론 깊이(effort) 확인/변경')
+        .addStringOption((opt) =>
+          opt
+            .setName('level')
+            .setDescription('추론 레벨 (생략 시 현재 설정 조회)')
+            .setRequired(false)
+            .addChoices(
+              ...EFFORT_CHOICES.map((c) => ({ name: c.label, value: c.value })),
+            ),
+        )
+        .toJSON(),
+    ];
+    await this.client.application.commands.set(commands);
+    logger.info('Slash commands registered globally');
+  }
+
+  private async handleRuntimeCommand(
+    interaction: import('discord.js').ChatInputCommandInteraction,
+  ): Promise<void> {
+    const chatJid = `dc:${interaction.channelId}`;
+    const group = this.opts.registeredGroups()[chatJid];
+    if (!group) {
+      await interaction.reply({
+        content: '이 채널은 NanoClaw에 등록되지 않았습니다.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    try {
+      if (interaction.commandName === 'model') {
+        const choice = interaction.options.getString('choice');
+        if (choice === null) {
+          const cur = loadRuntimeSettings(group.folder);
+          await interaction.reply({
+            content: `현재 설정 — 모델: **${modelLabel(cur.model)}** · effort: **${effortLabel(cur.effort)}**`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+        const next = updateRuntimeSettings(group.folder, { model: choice });
+        await interaction.reply({
+          content: `모델 변경 완료 → **${modelLabel(next.model)}** (다음 메시지부터 적용)`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      if (interaction.commandName === 'effort') {
+        const level = interaction.options.getString('level');
+        if (level === null) {
+          const cur = loadRuntimeSettings(group.folder);
+          await interaction.reply({
+            content: `현재 설정 — 모델: **${modelLabel(cur.model)}** · effort: **${effortLabel(cur.effort)}**`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+        const next = updateRuntimeSettings(group.folder, { effort: level });
+        await interaction.reply({
+          content: `Effort 변경 완료 → **${effortLabel(next.effort)}** (다음 메시지부터 적용)`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+    } catch (err) {
+      logger.error({ err, commandName: interaction.commandName }, 'Slash command handler error');
+      if (!interaction.replied) {
+        await interaction
+          .reply({
+            content: '명령 실행 실패. 서버 로그를 확인해주세요.',
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+      }
+    }
   }
 
   async sendMessage(

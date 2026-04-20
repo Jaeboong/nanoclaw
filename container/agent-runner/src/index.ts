@@ -33,6 +33,8 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  model?: string;
+  effort?: string;
 }
 
 interface ContainerOutput {
@@ -435,6 +437,21 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  // Runtime overrides from /model and /effort slash commands.
+  const modelOverride = containerInput.model || undefined;
+  const effortOverride = ['low', 'medium', 'high', 'max'].includes(
+    containerInput.effort ?? '',
+  )
+    ? (containerInput.effort as 'low' | 'medium' | 'high' | 'max')
+    : undefined;
+  if (modelOverride || effortOverride) {
+    log(
+      `Runtime overrides: model=${modelOverride ?? '(default)'}, effort=${
+        effortOverride ?? 'off'
+      }`,
+    );
+  }
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -442,6 +459,8 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
+      ...(modelOverride ? { model: modelOverride } : {}),
+      ...(effortOverride ? { effort: effortOverride } : {}),
       systemPrompt: globalClaudeMd
         ? {
             type: 'preset' as const,

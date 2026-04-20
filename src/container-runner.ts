@@ -18,6 +18,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { loadRuntimeSettings } from './group-runtime-settings.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
@@ -44,6 +45,10 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /** Runtime overrides from /model slash command. */
+  model?: string;
+  /** Runtime override from /effort slash command: 'low' | 'medium' | 'high' | 'max'. */
+  effort?: string;
 }
 
 export interface ContainerOutput {
@@ -397,7 +402,15 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
+    // Layer in per-group runtime overrides (set via /model, /effort).
+    // Explicit values on `input` win over persisted settings.
+    const persisted = loadRuntimeSettings(group.folder);
+    const inputWithOverrides: ContainerInput = {
+      ...input,
+      model: input.model ?? persisted.model,
+      effort: input.effort ?? persisted.effort,
+    };
+    container.stdin.write(JSON.stringify(inputWithOverrides));
     container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
