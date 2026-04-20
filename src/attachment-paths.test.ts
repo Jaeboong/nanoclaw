@@ -94,10 +94,7 @@ describe('resolveAttachmentPath', () => {
   });
 
   it('rejects directories', () => {
-    const r = resolveAttachmentPath(
-      '/workspace/extra/project/sub',
-      mounts(),
-    );
+    const r = resolveAttachmentPath('/workspace/extra/project/sub', mounts());
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/regular file/);
   });
@@ -160,9 +157,29 @@ describe('resolveAttachmentPaths batch', () => {
 
 describe('rejectionSummary', () => {
   it('formats common rejection reasons in Korean', () => {
-    expect(rejectionSummary({ containerPath: '/x/big.pdf', reason: 'File /x/big.pdf is 12000000 bytes, exceeds 10485760' })).toMatch(/big\.pdf.*exceeds/);
-    expect(rejectionSummary({ containerPath: '/x/dir', reason: 'Not a regular file: /x/dir' })).toMatch(/정규 파일이 아님/);
-    expect(rejectionSummary({ containerPath: '/etc/passwd', reason: 'Path /etc/passwd is not under any allowed mount' })).toMatch(/허용된 마운트 경로 밖/);
-    expect(rejectionSummary({ containerPath: 'rel.txt', reason: 'Attachment path must be absolute: rel.txt' })).toMatch(/잘못된 경로 형식/);
+    expect(
+      rejectionSummary({
+        containerPath: '/x/big.pdf',
+        reason: 'File /x/big.pdf is 12000000 bytes, exceeds 10485760',
+      }),
+    ).toMatch(/big\.pdf.*exceeds/);
+    expect(
+      rejectionSummary({
+        containerPath: '/x/dir',
+        reason: 'Not a regular file: /x/dir',
+      }),
+    ).toMatch(/정규 파일이 아님/);
+    expect(
+      rejectionSummary({
+        containerPath: '/etc/passwd',
+        reason: 'Path /etc/passwd is not under any allowed mount',
+      }),
+    ).toMatch(/허용된 마운트 경로 밖/);
+    expect(
+      rejectionSummary({
+        containerPath: 'rel.txt',
+        reason: 'Attachment path must be absolute: rel.txt',
+      }),
+    ).toMatch(/잘못된 경로 형식/);
   });
 });

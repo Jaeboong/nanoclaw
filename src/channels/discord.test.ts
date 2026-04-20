@@ -18,14 +18,23 @@ vi.mock('../config.js', () => ({
 
 // Mock attachment save (tests don't hit Discord CDN)
 vi.mock('./discord-attachments.js', () => ({
-  saveAttachment: vi.fn(async (att: { name: string | null; size: number; contentType: string | null }) => ({
-    hostPath: `/tmp/fake-host/${att.name ?? 'file'}`,
-    containerPath: `/workspace/group/inbox/stamp-${att.name ?? 'file'}`,
-    originalName: att.name ?? 'file',
-    size: att.size,
-    contentType: att.contentType,
-  })),
-  formatAttachmentReference: (s: { contentType: string | null; originalName: string }) => {
+  saveAttachment: vi.fn(
+    async (att: {
+      name: string | null;
+      size: number;
+      contentType: string | null;
+    }) => ({
+      hostPath: `/tmp/fake-host/${att.name ?? 'file'}`,
+      containerPath: `/workspace/group/inbox/stamp-${att.name ?? 'file'}`,
+      originalName: att.name ?? 'file',
+      size: att.size,
+      contentType: att.contentType,
+    }),
+  ),
+  formatAttachmentReference: (s: {
+    contentType: string | null;
+    originalName: string;
+  }) => {
     const ct = s.contentType ?? '';
     let kind = 'File';
     if (ct.startsWith('image/')) kind = 'Image';
@@ -182,9 +191,7 @@ function createMessage(overrides: {
     member: overrides.memberDisplayName
       ? { displayName: overrides.memberDisplayName }
       : null,
-    guild: overrides.guildName
-      ? { name: overrides.guildName }
-      : null,
+    guild: overrides.guildName ? { name: overrides.guildName } : null,
     channel: {
       name: overrides.channelName ?? 'general',
       messages: {
@@ -662,8 +669,11 @@ describe('DiscordChannel', () => {
 
       await channel.sendMessage('dc:1234567890123456', 'Hello');
 
-      const fetchedChannel = await currentClient().channels.fetch('1234567890123456');
-      expect(currentClient().channels.fetch).toHaveBeenCalledWith('1234567890123456');
+      const fetchedChannel =
+        await currentClient().channels.fetch('1234567890123456');
+      expect(currentClient().channels.fetch).toHaveBeenCalledWith(
+        '1234567890123456',
+      );
     });
 
     it('strips dc: prefix from JID', async () => {

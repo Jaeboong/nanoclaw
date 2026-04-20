@@ -20,7 +20,9 @@ export const MODEL_CHOICES = [
     value: 'claude-haiku-4-5-20251001',
   },
 ] as const;
-export const ALLOWED_MODELS = new Set<string>(MODEL_CHOICES.map((c) => c.value));
+export const ALLOWED_MODELS = new Set<string>(
+  MODEL_CHOICES.map((c) => c.value),
+);
 
 export const EFFORT_CHOICES = [
   { label: 'Off — 추론 기능 꺼짐', value: 'off' },
@@ -71,7 +73,10 @@ export function loadRuntimeSettings(folder: string): GroupRuntimeSettings {
     }
     return out;
   } catch (err) {
-    logger.warn({ folder, err }, 'runtime-settings: failed to read, using defaults');
+    logger.warn(
+      { folder, err },
+      'runtime-settings: failed to read, using defaults',
+    );
     return {};
   }
 }

@@ -16,14 +16,17 @@ import { RegisteredGroup } from './types.js';
  * message. We avoid leaking host paths — only the filename (basename) and
  * category are shown.
  */
-export function rejectionSummary(
-  item: { containerPath: string; reason: string },
-): string {
+export function rejectionSummary(item: {
+  containerPath: string;
+  reason: string;
+}): string {
   const name = item.containerPath.split('/').pop() || item.containerPath;
   const r = item.reason;
-  if (/exceeds /i.test(r) || /Per-message limit/i.test(r)) return `${name} — ${r}`;
+  if (/exceeds /i.test(r) || /Per-message limit/i.test(r))
+    return `${name} — ${r}`;
   if (/not a regular file/i.test(r)) return `${name} — 정규 파일이 아님`;
-  if (/not under any allowed mount/i.test(r)) return `${name} — 허용된 마운트 경로 밖`;
+  if (/not under any allowed mount/i.test(r))
+    return `${name} — 허용된 마운트 경로 밖`;
   if (/Cannot stat/i.test(r)) return `${name} — 파일을 찾을 수 없음`;
   if (/must be absolute/i.test(r) || /must not contain/i.test(r)) {
     return `${name} — 잘못된 경로 형식`;
@@ -61,7 +64,11 @@ export function getAttachmentMounts(group: RegisteredGroup): AttachmentMount[] {
   if (group.containerConfig?.additionalMounts) {
     for (const am of group.containerConfig.additionalMounts) {
       const result = validateMount(am, Boolean(group.isMain));
-      if (result.allowed && result.realHostPath && result.resolvedContainerPath) {
+      if (
+        result.allowed &&
+        result.realHostPath &&
+        result.resolvedContainerPath
+      ) {
         mounts.push({
           containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
           hostPath: result.realHostPath,
@@ -86,22 +93,30 @@ export function resolveAttachmentPath(
   mounts: readonly AttachmentMount[],
 ): ResolveResult {
   if (!path.isAbsolute(containerPath)) {
-    return { ok: false, reason: `Attachment path must be absolute: ${containerPath}` };
+    return {
+      ok: false,
+      reason: `Attachment path must be absolute: ${containerPath}`,
+    };
   }
   if (containerPath.split(path.sep).includes('..')) {
-    return { ok: false, reason: `Attachment path must not contain "..": ${containerPath}` };
+    return {
+      ok: false,
+      reason: `Attachment path must not contain "..": ${containerPath}`,
+    };
   }
 
   for (const mount of mounts) {
     const prefix = mount.containerPath.endsWith('/')
       ? mount.containerPath
       : mount.containerPath + '/';
-    const matches = containerPath === mount.containerPath || containerPath.startsWith(prefix);
+    const matches =
+      containerPath === mount.containerPath || containerPath.startsWith(prefix);
     if (!matches) continue;
 
-    const rel = containerPath === mount.containerPath
-      ? ''
-      : containerPath.slice(prefix.length);
+    const rel =
+      containerPath === mount.containerPath
+        ? ''
+        : containerPath.slice(prefix.length);
     const hostPath = rel ? path.join(mount.hostPath, rel) : mount.hostPath;
 
     const escaped = path.relative(mount.hostPath, hostPath);
@@ -130,7 +145,10 @@ export function resolveAttachmentPath(
     return { ok: true, hostPath };
   }
 
-  return { ok: false, reason: `Path ${containerPath} is not under any allowed mount` };
+  return {
+    ok: false,
+    reason: `Path ${containerPath} is not under any allowed mount`,
+  };
 }
 
 export interface AttachmentBatchResult {

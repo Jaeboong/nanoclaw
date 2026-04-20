@@ -127,7 +127,13 @@ export class DiscordChannel implements Channel {
 
       // Store chat metadata for discovery
       const isGroup = message.guild !== null;
-      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'discord', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'discord',
+        isGroup,
+      );
 
       // Only deliver full message for registered groups
       const group = this.opts.registeredGroups()[chatJid];
@@ -159,11 +165,14 @@ export class DiscordChannel implements Channel {
           .filter((r): r is NonNullable<typeof r> => r !== null)
           .map(formatAttachmentReference);
         if (refs.length > 0) {
-          content = content ? `${content}\n${refs.join('\n')}` : refs.join('\n');
+          content = content
+            ? `${content}\n${refs.join('\n')}`
+            : refs.join('\n');
         }
         const dropped = results.filter((r) => r === null).length;
         if (dropped > 0) {
-          content = `${content}\n[${dropped} attachment(s) could not be saved]`.trim();
+          content =
+            `${content}\n[${dropped} attachment(s) could not be saved]`.trim();
         }
       }
 
@@ -190,13 +199,19 @@ export class DiscordChannel implements Channel {
     });
 
     // Slash command handlers (/model, /effort) — runtime-only, no rebuild needed
-    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-      if (!interaction.isChatInputCommand()) return;
-      if (interaction.commandName !== 'model' && interaction.commandName !== 'effort') {
-        return;
-      }
-      await this.handleRuntimeCommand(interaction);
-    });
+    this.client.on(
+      Events.InteractionCreate,
+      async (interaction: Interaction) => {
+        if (!interaction.isChatInputCommand()) return;
+        if (
+          interaction.commandName !== 'model' &&
+          interaction.commandName !== 'effort'
+        ) {
+          return;
+        }
+        await this.handleRuntimeCommand(interaction);
+      },
+    );
 
     return new Promise<void>((resolve) => {
       this.client!.once(Events.ClientReady, async (readyClient) => {
@@ -304,7 +319,10 @@ export class DiscordChannel implements Channel {
         return;
       }
     } catch (err) {
-      logger.error({ err, commandName: interaction.commandName }, 'Slash command handler error');
+      logger.error(
+        { err, commandName: interaction.commandName },
+        'Slash command handler error',
+      );
       if (!interaction.replied) {
         await interaction
           .reply({
@@ -343,7 +361,10 @@ export class DiscordChannel implements Channel {
 
       const MAX_LENGTH = 2000;
       if (text.length <= MAX_LENGTH) {
-        await textChannel.send({ content: text || undefined, files: attachments });
+        await textChannel.send({
+          content: text || undefined,
+          files: attachments,
+        });
       } else {
         // Attach files to the first chunk only; remainder is text-only.
         await textChannel.send({

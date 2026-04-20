@@ -315,8 +315,8 @@ async function buildContainerArgs(
   // non-root container user can talk to it.
   // Match by basename since mount-security normalizes via realpath
   // (e.g., /var/run/docker.sock -> /run/docker.sock on Linux).
-  const dockerSockMount = mounts.find((m) =>
-    path.basename(m.hostPath) === 'docker.sock',
+  const dockerSockMount = mounts.find(
+    (m) => path.basename(m.hostPath) === 'docker.sock',
   );
   if (dockerSockMount) {
     args.push('-e', `DOCKER_HOST=unix://${dockerSockMount.containerPath}`);
