@@ -24,6 +24,15 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    poppler-utils \
+    ca-certificates \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
@@ -59,6 +68,15 @@ RUN printf '#!/bin/bash\nset -e\ncd /app && npx tsc --outDir /tmp/dist 2>&1 >&2\
 
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace && chmod 777 /home/node
+
+# Add passwd/group entries for common host uids (1001-1005) so getpwuid()
+# inside the container resolves when docker runs with --user <host-uid>:<gid>.
+# Without this, tools like SSH fail with "No user exists for uid N".
+# HOME points at /home/node which is world-writable (chmod 777 above).
+RUN for i in 1 2 3 4 5; do \
+      echo "host${i}:x:100${i}:100${i}:host user:/home/node:/bin/bash" >> /etc/passwd; \
+      echo "host${i}:x:100${i}:" >> /etc/group; \
+    done
 
 # Switch to non-root user (required for --dangerously-skip-permissions)
 USER node

@@ -289,6 +289,47 @@ async function buildContainerArgs(
     }
   }
 
+  // Git SSH passthrough: if a mount contains a nanoclaw-git key directory,
+  // wire git/ssh to use it via GIT_SSH_COMMAND so the agent can push/pull
+  // without host SSH config or key discovery.
+  const gitKeyMount = mounts.find(
+    (m) => path.basename(m.hostPath) === 'nanoclaw-git',
+  );
+  if (gitKeyMount) {
+    const keyPath = `${gitKeyMount.containerPath}/id_ed25519`;
+    const knownHostsPath = `${gitKeyMount.containerPath}/known_hosts`;
+    args.push(
+      '-e',
+      `GIT_SSH_COMMAND=ssh -i ${keyPath} -o UserKnownHostsFile=${knownHostsPath} -o IdentitiesOnly=yes`,
+    );
+    logger.info({ containerName }, 'Git SSH passthrough enabled');
+  }
+
+  // Docker socket passthrough: if a mount binds the host Docker socket,
+  // expose it via DOCKER_HOST and join the host's docker group so the
+  // non-root container user can talk to it.
+  // Match by basename since mount-security normalizes via realpath
+  // (e.g., /var/run/docker.sock -> /run/docker.sock on Linux).
+  const dockerSockMount = mounts.find((m) =>
+    path.basename(m.hostPath) === 'docker.sock',
+  );
+  if (dockerSockMount) {
+    args.push('-e', `DOCKER_HOST=unix://${dockerSockMount.containerPath}`);
+    try {
+      const sockGid = fs.statSync(dockerSockMount.hostPath).gid;
+      args.push('--group-add', String(sockGid));
+      logger.info(
+        { containerName, sockGid },
+        'Docker socket passthrough enabled',
+      );
+    } catch (err) {
+      logger.warn(
+        { containerName, err },
+        'Docker socket mount present but stat failed — CLI calls may hit EACCES',
+      );
+    }
+  }
+
   args.push(CONTAINER_IMAGE);
 
   return args;

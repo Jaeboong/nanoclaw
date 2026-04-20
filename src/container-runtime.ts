@@ -12,11 +12,24 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
-  if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
+  if (os.platform() !== 'linux') return [];
+
+  // Linux Docker with OneCLI on a separate bridge network can't reach
+  // the gateway-mapped host via host.docker.internal due to bridge
+  // isolation. Resolve OneCLI's container IP directly when available.
+  try {
+    const bridgeIp = execSync(
+      `${CONTAINER_RUNTIME_BIN} inspect onecli --format '{{.NetworkSettings.Networks.bridge.IPAddress}}'`,
+      { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 },
+    ).trim();
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(bridgeIp)) {
+      return ['--add-host=host.docker.internal:' + bridgeIp];
+    }
+  } catch {
+    /* OneCLI container not present or not on bridge — fall back */
   }
-  return [];
+
+  return ['--add-host=host.docker.internal:host-gateway'];
 }
 
 /** Returns CLI args for a readonly bind mount. */
