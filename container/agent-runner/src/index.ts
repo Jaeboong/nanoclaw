@@ -88,6 +88,13 @@ function writeAgentStats(stats: AgentTurnStats): void {
   }
 }
 
+function channelHintFor(chatJid: string): string | null {
+  if (chatJid.startsWith('dc:')) {
+    return '[Channel: Discord — for multi-part responses, load the discord-formatting skill and use color-coded section headers (## 🔍 분석 / ## 📌 결론 / ## ⚠️ 주의 / ## ❓ 질문). Keep trivial one-liners plain.]';
+  }
+  return null;
+}
+
 function categorizeTool(name: string): string | null {
   switch (name) {
     case 'Read':
@@ -854,6 +861,10 @@ async function main(): Promise<void> {
   let prompt = containerInput.prompt;
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
+  }
+  const channelHint = channelHintFor(containerInput.chatJid);
+  if (channelHint) {
+    prompt = `${channelHint}\n\n${prompt}`;
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
