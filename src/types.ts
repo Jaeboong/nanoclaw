@@ -84,12 +84,26 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
+// Turn-level metadata attached to agent-originated messages. Only surfaced
+// for final send_message IPC payloads; system/router messages omit it.
+// Channels that don't render metadata (all non-Discord today) must ignore it.
+export interface MessageMetadata {
+  toolCounts?: Record<string, number>;
+  elapsedMs?: number;
+  model?: string;
+}
+
 export interface Channel {
   name: string;
   connect(): Promise<void>;
   // files: absolute host paths (already translated from container paths by
   // the caller). Channels that don't support attachments must ignore them.
-  sendMessage(jid: string, text: string, files?: string[]): Promise<void>;
+  sendMessage(
+    jid: string,
+    text: string,
+    files?: string[],
+    metadata?: MessageMetadata,
+  ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;

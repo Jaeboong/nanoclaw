@@ -1,6 +1,7 @@
 import {
   AttachmentBuilder,
   Client,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
   MessageFlags,
@@ -29,10 +30,12 @@ import {
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  MessageMetadata,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+import { buildEmbedsForMessage } from './discord-sections.js';
 
 export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
@@ -388,6 +391,7 @@ export class DiscordChannel implements Channel {
     jid: string,
     text: string,
     files?: string[],
+    metadata?: MessageMetadata,
   ): Promise<void> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
@@ -410,24 +414,40 @@ export class DiscordChannel implements Channel {
           ? files.map((f) => new AttachmentBuilder(f))
           : undefined;
 
-      const MAX_LENGTH = 2000;
-      if (text.length <= MAX_LENGTH) {
-        await textChannel.send({
-          content: text || undefined,
-          files: attachments,
-        });
-      } else {
-        // Attach files to the first chunk only; remainder is text-only.
-        await textChannel.send({
-          content: text.slice(0, MAX_LENGTH),
-          files: attachments,
-        });
-        for (let i = MAX_LENGTH; i < text.length; i += MAX_LENGTH) {
-          await textChannel.send(text.slice(i, i + MAX_LENGTH));
+      const { embeds, overflowText } = buildEmbedsForMessage(text, metadata);
+
+      // Empty text but attachments present — send files with no embed.
+      if (embeds.length === 0) {
+        if (attachments && attachments.length > 0) {
+          await textChannel.send({ files: attachments });
+        }
+        return;
+      }
+
+      const EMBEDS_PER_MESSAGE = 10;
+      for (let i = 0; i < embeds.length; i += EMBEDS_PER_MESSAGE) {
+        const batch = embeds.slice(i, i + EMBEDS_PER_MESSAGE);
+        const payload: { embeds: EmbedBuilder[]; files?: AttachmentBuilder[] } =
+          { embeds: batch };
+        if (i === 0 && attachments) payload.files = attachments;
+        await textChannel.send(payload);
+      }
+
+      if (overflowText) {
+        const MAX_LENGTH = 2000;
+        for (let i = 0; i < overflowText.length; i += MAX_LENGTH) {
+          await textChannel.send(overflowText.slice(i, i + MAX_LENGTH));
         }
       }
+
       logger.info(
-        { jid, length: text.length, fileCount: attachments?.length ?? 0 },
+        {
+          jid,
+          length: text.length,
+          embedCount: embeds.length,
+          overflowChars: overflowText.length,
+          fileCount: attachments?.length ?? 0,
+        },
         'Discord message sent',
       );
     } catch (err) {

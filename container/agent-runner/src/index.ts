@@ -66,7 +66,54 @@ const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
+const IPC_STATS_FILE = '/workspace/ipc/agent_stats.json';
 const STATUS_MAX_CHARS = 300;
+
+interface AgentTurnStats {
+  chatJid: string;
+  startTime: number;
+  toolCounts: Record<string, number>;
+  model: string;
+}
+
+function writeAgentStats(stats: AgentTurnStats): void {
+  try {
+    const tmp = IPC_STATS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(stats));
+    fs.renameSync(tmp, IPC_STATS_FILE);
+  } catch (err) {
+    console.error(
+      `[agent-runner] Failed to write agent stats: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function categorizeTool(name: string): string | null {
+  switch (name) {
+    case 'Read':
+      return 'read';
+    case 'Write':
+      return 'write';
+    case 'Edit':
+      return 'edit';
+    case 'Bash':
+      return 'bash';
+    case 'Glob':
+    case 'Grep':
+      return 'search';
+    case 'WebFetch':
+    case 'WebSearch':
+      return 'web';
+    case 'Task':
+      return 'subagent';
+    case 'TodoWrite':
+      return 'todo';
+    case 'NotebookEdit':
+      return 'notebook';
+    default:
+      return null;
+  }
+}
 
 function writeStatusIpc(
   chatJid: string,
@@ -509,6 +556,15 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  const turnStartTime = Date.now();
+  const toolCounts: Record<string, number> = {};
+  writeAgentStats({
+    chatJid: containerInput.chatJid,
+    startTime: turnStartTime,
+    toolCounts,
+    model: containerInput.model ?? '',
+  });
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
@@ -630,6 +686,19 @@ async function runQuery(
             typeof block === 'object' &&
             (block as { type?: string }).type === 'tool_use'
           ) {
+            const blockWithName = block as { name?: string };
+            if (typeof blockWithName.name === 'string') {
+              const category = categorizeTool(blockWithName.name);
+              if (category) {
+                toolCounts[category] = (toolCounts[category] ?? 0) + 1;
+                writeAgentStats({
+                  chatJid: containerInput.chatJid,
+                  startTime: turnStartTime,
+                  toolCounts,
+                  model: containerInput.model ?? '',
+                });
+              }
+            }
             const status = formatToolUseStatus(block);
             if (status) {
               writeStatusIpc(

@@ -14,6 +14,29 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const STATS_FILE = path.join(IPC_DIR, 'agent_stats.json');
+
+function readTurnMetadata(): Record<string, unknown> | undefined {
+  try {
+    if (!fs.existsSync(STATS_FILE)) return undefined;
+    const raw = fs.readFileSync(STATS_FILE, 'utf-8');
+    const stats = JSON.parse(raw) as {
+      startTime?: number;
+      toolCounts?: Record<string, number>;
+      model?: string;
+    };
+    return {
+      toolCounts: stats.toolCounts ?? {},
+      elapsedMs:
+        typeof stats.startTime === 'number'
+          ? Date.now() - stats.startTime
+          : undefined,
+      model: stats.model || undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -72,6 +95,10 @@ Channel limits: Discord allows up to 10 files per message, 25 MB each (free tier
     };
     if (args.files && args.files.length > 0) {
       data.files = args.files;
+    }
+    const metadata = readTurnMetadata();
+    if (metadata) {
+      data.metadata = metadata;
     }
 
     writeIpcFile(MESSAGES_DIR, data);

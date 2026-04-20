@@ -122,11 +122,61 @@ vi.mock('discord.js', () => {
   // Mock TextChannel type
   class TextChannel {}
 
+  class EmbedBuilder {
+    data: any = { fields: [] };
+    setColor(c: number) {
+      this.data.color = c;
+      return this;
+    }
+    setDescription(d: string) {
+      this.data.description = d;
+      return this;
+    }
+    setFooter(f: any) {
+      this.data.footer = f;
+      return this;
+    }
+    setAuthor(a: any) {
+      this.data.author = a;
+      return this;
+    }
+    setTitle(t: string) {
+      this.data.title = t;
+      return this;
+    }
+    setURL(u: string) {
+      this.data.url = u;
+      return this;
+    }
+    setThumbnail(u: string) {
+      this.data.thumbnail = { url: u };
+      return this;
+    }
+    setImage(u: string) {
+      this.data.image = { url: u };
+      return this;
+    }
+    setTimestamp(d: Date) {
+      this.data.timestamp = d.toISOString();
+      return this;
+    }
+    addFields(...fs: any[]) {
+      this.data.fields.push(...fs);
+      return this;
+    }
+  }
+
+  class AttachmentBuilder {
+    constructor(public input: any) {}
+  }
+
   return {
     Client: MockClient,
     Events,
     GatewayIntentBits,
     TextChannel,
+    EmbedBuilder,
+    AttachmentBuilder,
   };
 });
 
@@ -711,7 +761,7 @@ describe('DiscordChannel', () => {
       // No error, no API call
     });
 
-    it('splits messages exceeding 2000 characters', async () => {
+    it('wraps plain text in a single default embed under description limit', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
       await channel.connect();
@@ -722,15 +772,32 @@ describe('DiscordChannel', () => {
       };
       currentClient().channels.fetch.mockResolvedValue(mockChannel);
 
-      const longText = 'x'.repeat(3000);
+      await channel.sendMessage('dc:1234567890123456', '응, 완료했어.');
+
+      expect(mockChannel.send).toHaveBeenCalledTimes(1);
+      const payload = mockChannel.send.mock.calls[0][0];
+      expect(payload).toHaveProperty('embeds');
+      expect(payload.embeds).toHaveLength(1);
+    });
+
+    it('sends embed plus plain-text follow-up when body exceeds embed limit', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const mockChannel = {
+        send: vi.fn().mockResolvedValue(undefined),
+        sendTyping: vi.fn(),
+      };
+      currentClient().channels.fetch.mockResolvedValue(mockChannel);
+
+      const longText = 'x'.repeat(4500);
       await channel.sendMessage('dc:1234567890123456', longText);
 
+      // 1 embed (4096 chars) + 1 plain text message (404 chars)
       expect(mockChannel.send).toHaveBeenCalledTimes(2);
-      expect(mockChannel.send).toHaveBeenNthCalledWith(1, {
-        content: 'x'.repeat(2000),
-        files: undefined,
-      });
-      expect(mockChannel.send).toHaveBeenNthCalledWith(2, 'x'.repeat(1000));
+      expect(mockChannel.send.mock.calls[0][0]).toHaveProperty('embeds');
+      expect(mockChannel.send.mock.calls[1][0]).toBe('x'.repeat(404));
     });
   });
 

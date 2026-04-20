@@ -12,10 +12,15 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { MessageMetadata, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string, files?: string[]) => Promise<void>;
+  sendMessage: (
+    jid: string,
+    text: string,
+    files?: string[],
+    metadata?: MessageMetadata,
+  ) => Promise<void>;
   /** Edit-in-place progress line (thinking summary). Channels without
    * support should return a resolved promise. */
   sendStatus: (jid: string, text: string) => Promise<void>;
@@ -135,7 +140,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       }
                     }
                   }
-                  await deps.sendMessage(data.chatJid, outboundText, hostFiles);
+                  const metadata: MessageMetadata | undefined =
+                    data.metadata && typeof data.metadata === 'object'
+                      ? (data.metadata as MessageMetadata)
+                      : undefined;
+                  await deps.sendMessage(
+                    data.chatJid,
+                    outboundText,
+                    hostFiles,
+                    metadata,
+                  );
                   logger.info(
                     {
                       chatJid: data.chatJid,
