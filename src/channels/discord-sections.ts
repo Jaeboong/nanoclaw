@@ -122,6 +122,7 @@ const SECTION_CONFIG: Record<string, { color: number; emoji: string }> = {
   주의: { color: 0xed4245, emoji: '⚠️' },
   에러: { color: 0xed4245, emoji: '⚠️' },
   질문: { color: 0xfee75c, emoji: '❓' },
+  로그: { color: 0x99aab5, emoji: '📋' },
 };
 
 export interface ParsedSection {

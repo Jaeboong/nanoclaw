@@ -146,11 +146,82 @@ function writeStatusIpc(
   }
 }
 
+function writeMessageIpc(
+  chatJid: string,
+  groupFolder: string,
+  text: string,
+): void {
+  try {
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.json`;
+    fs.writeFileSync(
+      path.join(IPC_MESSAGES_DIR, filename),
+      JSON.stringify({
+        type: 'message',
+        chatJid,
+        groupFolder,
+        text,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  } catch (err) {
+    console.error(
+      `[agent-runner] Failed to write message IPC: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function formatTodoLedger(todos: unknown): string | null {
+  if (!Array.isArray(todos) || todos.length === 0) return null;
+  const lines: string[] = [];
+  for (const t of todos) {
+    if (!t || typeof t !== 'object') continue;
+    const todo = t as {
+      content?: unknown;
+      status?: unknown;
+      activeForm?: unknown;
+    };
+    const status = typeof todo.status === 'string' ? todo.status : 'pending';
+    const content =
+      status === 'in_progress' && typeof todo.activeForm === 'string'
+        ? todo.activeForm
+        : typeof todo.content === 'string'
+          ? todo.content
+          : '';
+    if (!content) continue;
+    const mark =
+      status === 'completed' ? '☑' : status === 'in_progress' ? '▶' : '☐';
+    lines.push(`${mark} ${content}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
 function shortenForStatus(raw: unknown, max: number): string {
   if (typeof raw !== 'string') return '';
   const normalized = raw.replace(/\s+/g, ' ').trim();
   if (normalized.length <= max) return normalized;
   return normalized.slice(0, max - 1) + '…';
+}
+
+function redactSecrets(s: string): string {
+  if (!s) return s;
+  return s
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._\-~+/=]{8,}/gi, '$1 ***')
+    .replace(/\bsk-ant-[A-Za-z0-9_\-]+/g, 'sk-ant-***')
+    .replace(/\bsk-[A-Za-z0-9]{16,}/g, 'sk-***')
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, 'gh*_***')
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]+/g, 'xox*-***')
+    .replace(/\bAIza[0-9A-Za-z_\-]{20,}/g, 'AIza***')
+    .replace(/\bAKIA[A-Z0-9]{16}\b/g, 'AKIA***')
+    .replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/g, 'jwt.***')
+    .replace(
+      /(-H\s+["']?\s*Authorization\s*:\s*)[^"'\n]+(["'])/gi,
+      '$1***$2',
+    )
+    .replace(/(--(?:password|token|secret|api[-_]?key)[= ])\S+/gi, '$1***')
+    .replace(
+      /\b([A-Z][A-Z0-9_]*_(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|PWD))=\S+/g,
+      '$1=***',
+    );
 }
 
 function tailPath(raw: unknown): string {
@@ -176,8 +247,15 @@ function formatToolUseStatus(block: unknown): string | null {
       return withTarget('✏️', '쓰는 중', tailPath(input.file_path));
     case 'Edit':
       return withTarget('✏️', '편집 중', tailPath(input.file_path));
-    case 'Bash':
-      return withTarget('⚡', '실행 중', shortenForStatus(input.command, 80));
+    case 'Bash': {
+      const desc =
+        typeof input.description === 'string' ? input.description.trim() : '';
+      if (desc) return withTarget('⚡', '실행 중', shortenForStatus(desc, 80));
+      const safeCmd = redactSecrets(
+        typeof input.command === 'string' ? input.command : '',
+      );
+      return withTarget('⚡', '실행 중', shortenForStatus(safeCmd, 80));
+    }
     case 'Glob':
       return withTarget('🔍', '찾는 중', shortenForStatus(input.pattern, 60));
     case 'Grep':
@@ -192,7 +270,10 @@ function formatToolUseStatus(block: unknown): string | null {
       return withTarget(
         '🌐',
         '웹 가져오는 중',
-        shortenForStatus(input.url, 60),
+        shortenForStatus(
+          redactSecrets(typeof input.url === 'string' ? input.url : ''),
+          60,
+        ),
       );
     case 'TodoWrite':
       return '📋 할 일 정리 중...';
@@ -713,6 +794,21 @@ async function runQuery(
                 containerInput.groupFolder,
                 status,
               );
+            }
+            if (
+              blockWithName.name === 'TodoWrite' &&
+              containerInput.chatJid.startsWith('dc:')
+            ) {
+              const input =
+                (block as { input?: Record<string, unknown> }).input ?? {};
+              const ledger = formatTodoLedger(input.todos);
+              if (ledger) {
+                writeMessageIpc(
+                  containerInput.chatJid,
+                  containerInput.groupFolder,
+                  `## 로그\n${ledger}`,
+                );
+              }
             }
           }
         }
