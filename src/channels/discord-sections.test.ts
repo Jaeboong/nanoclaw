@@ -94,38 +94,40 @@ describe('parseSections', () => {
 });
 
 describe('buildEmbedsForMessage', () => {
-  it('produces zero embeds for blank input', () => {
-    const { embeds, overflowText } = buildEmbedsForMessage('');
+  it('produces zero embeds for blank input', async () => {
+    const { embeds, overflowText, attachments } =
+      await buildEmbedsForMessage('');
     expect(embeds).toHaveLength(0);
     expect(overflowText).toBe('');
+    expect(attachments).toHaveLength(0);
   });
 
-  it('produces one white embed for plain text', () => {
-    const { embeds } = buildEmbedsForMessage('응, 완료했어.');
+  it('produces one white embed for plain text', async () => {
+    const { embeds } = await buildEmbedsForMessage('응, 완료했어.');
     expect(embeds).toHaveLength(1);
     expect(embeds[0].data.color).toBe(0xffffff);
     expect(embeds[0].data.description).toBe('응, 완료했어.');
   });
 
-  it('produces colored embeds matching section order', () => {
+  it('produces colored embeds matching section order', async () => {
     const input = '## 🔍 분석\nA\n\n## 📌 결론\nB';
-    const { embeds } = buildEmbedsForMessage(input);
+    const { embeds } = await buildEmbedsForMessage(input);
     expect(embeds).toHaveLength(2);
     expect(embeds[0].data.color).toBe(0x57f287); // green
     expect(embeds[1].data.color).toBe(0x3498db); // blue
   });
 
-  it('overflows into plain text when body exceeds embed description limit', () => {
+  it('overflows into plain text when body exceeds embed description limit', async () => {
     const longBody = 'x'.repeat(EMBED_DESC_LIMIT + 200);
-    const { embeds, overflowText } = buildEmbedsForMessage(longBody);
+    const { embeds, overflowText } = await buildEmbedsForMessage(longBody);
     expect(embeds).toHaveLength(1);
     expect(embeds[0].data.description).toHaveLength(EMBED_DESC_LIMIT);
     expect(overflowText).toHaveLength(200);
   });
 
-  it('attaches footer to last embed only when metadata present', () => {
+  it('attaches footer to last embed only when metadata present', async () => {
     const input = '## 🔍 분석\nA\n\n## 📌 결론\nB';
-    const { embeds } = buildEmbedsForMessage(input, {
+    const { embeds } = await buildEmbedsForMessage(input, {
       toolCounts: { read: 3, bash: 2 },
       elapsedMs: 14000,
       model: 'claude-opus-4-7',
@@ -137,17 +139,38 @@ describe('buildEmbedsForMessage', () => {
     expect(embeds[1].data.footer?.text).toContain('claude-opus-4-7');
   });
 
-  it('omits footer when metadata has no usable fields', () => {
-    const { embeds } = buildEmbedsForMessage('plain', {});
+  it('omits footer when metadata has no usable fields', async () => {
+    const { embeds } = await buildEmbedsForMessage('plain', {});
     expect(embeds[0].data.footer).toBeUndefined();
   });
 
-  it('combines write and edit counts under single pencil emoji', () => {
-    const { embeds } = buildEmbedsForMessage('plain', {
+  it('combines write and edit counts under single pencil emoji', async () => {
+    const { embeds } = await buildEmbedsForMessage('plain', {
       toolCounts: { write: 2, edit: 3 },
     });
     const footer = embeds[0].data.footer?.text ?? '';
     expect(footer).toContain('✏️ 5');
+  });
+
+  it('emits an image embed for pipe tables when renderer is available', async () => {
+    const input = [
+      'before',
+      '',
+      '| A | B |',
+      '|---|---|',
+      '| 1 | 2 |',
+      '',
+      'after',
+    ].join('\n');
+    const { embeds, attachments } = await buildEmbedsForMessage(input);
+    // text-before embed, image embed, text-after embed
+    expect(embeds.length).toBeGreaterThanOrEqual(2);
+    const hasImage = embeds.some((e) =>
+      e.data.image?.url?.startsWith('attachment://table_'),
+    );
+    expect(hasImage).toBe(true);
+    expect(attachments.length).toBeGreaterThanOrEqual(1);
+    expect(attachments[0].name).toMatch(/^table_\d+\.png$/);
   });
 });
 
@@ -261,7 +284,7 @@ describe('sanitizeDiscordMarkdown', () => {
 });
 
 describe('buildEmbedsForMessage with frontmatter', () => {
-  it('applies author to first embed', () => {
+  it('applies author to first embed', async () => {
     const input = [
       '---',
       'author: Andy',
@@ -272,26 +295,26 @@ describe('buildEmbedsForMessage with frontmatter', () => {
       '## 📌 결론',
       'B',
     ].join('\n');
-    const { embeds } = buildEmbedsForMessage(input);
+    const { embeds } = await buildEmbedsForMessage(input);
     expect(embeds).toHaveLength(2);
     expect(embeds[0].data.author).toEqual({ name: 'Andy' });
     expect(embeds[1].data.author).toBeUndefined();
   });
 
-  it('applies fields to first embed', () => {
+  it('applies fields to first embed', async () => {
     const input = [
       '---',
       'fields: [{"name":"Risk","value":"Low","inline":true}]',
       '---',
       'body',
     ].join('\n');
-    const { embeds } = buildEmbedsForMessage(input);
+    const { embeds } = await buildEmbedsForMessage(input);
     expect(embeds[0].data.fields).toEqual([
       { name: 'Risk', value: 'Low', inline: true },
     ]);
   });
 
-  it('caps fields at 25 items', () => {
+  it('caps fields at 25 items', async () => {
     const many = Array.from({ length: 40 }, (_, i) => ({
       name: `n${i}`,
       value: `v${i}`,
@@ -302,13 +325,13 @@ describe('buildEmbedsForMessage with frontmatter', () => {
       '---',
       'body',
     ].join('\n');
-    const { embeds } = buildEmbedsForMessage(input);
+    const { embeds } = await buildEmbedsForMessage(input);
     expect(embeds[0].data.fields).toHaveLength(25);
   });
 
-  it('applies sanitize before sectioning', () => {
+  it('applies sanitize before sectioning', async () => {
     const input = '#### small header\n\nbody';
-    const { embeds } = buildEmbedsForMessage(input);
+    const { embeds } = await buildEmbedsForMessage(input);
     expect(embeds[0].data.description).toContain('**small header**');
   });
 });

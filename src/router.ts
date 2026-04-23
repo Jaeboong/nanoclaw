@@ -23,9 +23,7 @@ export function formatMessages(
       m.reply_to_message_content && m.reply_to_sender_name
         ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name)}">${escapeXml(m.reply_to_message_content)}</quoted_message>`
         : '';
-    const senderIdAttr = m.sender
-      ? ` sender_id="${escapeXml(m.sender)}"`
-      : '';
+    const senderIdAttr = m.sender ? ` sender_id="${escapeXml(m.sender)}"` : '';
     return `<message sender="${escapeXml(m.sender_name)}"${senderIdAttr} time="${escapeXml(displayTime)}"${replyAttr}>${replySnippet}${escapeXml(m.content)}</message>`;
   });
 

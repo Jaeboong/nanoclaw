@@ -409,17 +409,26 @@ export class DiscordChannel implements Channel {
 
       const textChannel = channel as TextChannel;
       await this.clearStatus(jid, textChannel);
-      const attachments =
+      const inboundFiles =
         files && files.length > 0
           ? files.map((f) => new AttachmentBuilder(f))
-          : undefined;
+          : [];
 
-      const { embeds, overflowText } = buildEmbedsForMessage(text, metadata);
+      const {
+        embeds,
+        overflowText,
+        attachments: tableAttachments,
+      } = await buildEmbedsForMessage(text, metadata);
+
+      // Image-embed `attachment://...` URLs must travel with the FIRST send().
+      // Discord matches attachments by filename, so inbound files go with the
+      // first payload too (existing behavior).
+      const firstBatchFiles = [...inboundFiles, ...tableAttachments];
 
       // Empty text but attachments present — send files with no embed.
       if (embeds.length === 0) {
-        if (attachments && attachments.length > 0) {
-          await textChannel.send({ files: attachments });
+        if (firstBatchFiles.length > 0) {
+          await textChannel.send({ files: firstBatchFiles });
         }
         return;
       }
@@ -429,7 +438,9 @@ export class DiscordChannel implements Channel {
         const batch = embeds.slice(i, i + EMBEDS_PER_MESSAGE);
         const payload: { embeds: EmbedBuilder[]; files?: AttachmentBuilder[] } =
           { embeds: batch };
-        if (i === 0 && attachments) payload.files = attachments;
+        if (i === 0 && firstBatchFiles.length > 0) {
+          payload.files = firstBatchFiles;
+        }
         await textChannel.send(payload);
       }
 
@@ -446,7 +457,8 @@ export class DiscordChannel implements Channel {
           length: text.length,
           embedCount: embeds.length,
           overflowChars: overflowText.length,
-          fileCount: attachments?.length ?? 0,
+          fileCount: firstBatchFiles.length,
+          tableCount: tableAttachments.length,
         },
         'Discord message sent',
       );
