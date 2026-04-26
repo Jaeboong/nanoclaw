@@ -226,7 +226,66 @@ Reply with a JSON array of commands. ...
 
 ---
 
-## 12. 응답 검증 체크리스트 (턴 종료 직전 자가 확인)
+## 12. 랠리 포인트 (setRally) — 자동화의 핵심
+
+**매 tick 새로 생산된 유닛에게 일일이 명령을 내리지 마세요.** 생산 건물의 rally point 를 한 번 설정하면 그 이후 spawn 되는 모든 유닛이 자동으로 그쪽으로 갑니다. LLM 호출 비용·명령 누락·idle 워커를 모두 줄이는 가장 큰 레버입니다.
+
+### 12-1. 동작 규칙 (게임 측 확정)
+
+`setRally(buildingId, pos)` 는 building 의 rallyPoint 를 `pos` (월드 px) 로 저장합니다. 그 건물이 유닛을 spawn 할 때마다 신규 유닛의 첫 명령이 다음 규칙으로 자동 결정됩니다:
+
+| rally pos 가 가리키는 셀의 점유물 | 새 유닛이 받는 명령 |
+|---|---|
+| `mineralNode` 또는 `supplyDepot` 위 + 새 유닛이 `worker` | **`gather(occupant.id)`** — 즉시 채취 시작 |
+| 그 외 점유물 (적/내 건물 등) | `move` — `pos` 를 인접 walkable 셀로 clamp 후 이동 |
+| 빈 walkable 셀 | `move(pos)` |
+
+핵심 따름:
+- **Worker 외 유닛은 mineralNode 위에 rally 해도 채취 안 됨** — `move` 만 됨. (gather 는 worker 전용)
+- mineralNode 위에 supplyDepot 이 완성돼 있어도 OK — depot 가 occupancy 를 덮어쓰므로 둘 다 trigger 함. **단 depot 이 underConstruction 이면 gather 는 거부** (게임 측 채취 단계에서). 안전하게 가려면 depot 완성 후 setRally.
+
+### 12-2. CC rally → 자동 채취 (가장 강력)
+
+새 supplyDepot 이 완성된 mineralNode 위에 CC 의 rally 를 두세요. 그 뒤로 `produce(CC, "worker")` 만 하면 spawn 된 워커가 알아서 그 노드 채취를 시작합니다 — `gather` 명령 발행 불필요.
+
+```
+setRally(buildingId=<CC.id>, pos={x: nodeCellX*16+8, y: nodeCellY*16+8})
+```
+
+`pos` 가 셀 중앙 좌표인지 확인 (`cell * 16 + 8`).
+
+### 12-3. Barracks/Factory rally → 군 집결
+
+군사 건물의 rally 를 적 베이스 진군로의 way-point, 본진 방어 위치, 또는 marine deathball 집결 지점에 두세요. 생산되는 모든 marine/medic/tank 가 자동으로 거기로 `move`.
+
+```
+setRally(buildingId=<barracks.id>, pos={x: 600, y: 1000})
+```
+
+주의:
+- **rally pos 는 walkable 좌표여야 의미 있음.** 적 건물 위에 두면 점유돼서 인접 walkable 셀로 clamp — 의도와 다른 위치로 갈 수 있음. **공격 명령이 아닙니다 — 단순 이동입니다.** 적과 교전시키려면 별도 `attackMove` 가 필요.
+- 본진 방어용으로 두면 spawn 한 marine 가 본진 근처에 누적 → 이후 한꺼번에 `attackMove` 로 보내기 편함.
+
+### 12-4. 권장 사용 패턴
+
+1. **새 supplyDepot 짓는 즉시 (또는 완성 즉시)**: `setRally(CC, depot 위 좌표)` → 그 뒤 produce 한 워커가 새 노드 자동 채취. 한 번 설정하면 매 tick 새 워커 명령 불필요.
+2. **Barracks 완성 즉시**: `setRally(Barracks, 적 베이스 방향 way-point)` → 생산되는 marine 알아서 집결. 일정 수 모이면 그때 `attackMove` 로 일괄 진군.
+3. **rally 변경**: 같은 buildingId 로 `setRally` 다시 호출 (overwrite). `cancel(buildingId)` 은 rally 를 지우지 않음 — rally 해제 의도면 다른 위치로 다시 setRally.
+4. **노드 고갈 시**: 다음 mineralNode 에 새 depot 짓고 즉시 `setRally(CC, 새 depot 좌표)` 로 갱신.
+
+### 12-5. 흔한 실수
+
+| ❌ 잘못 | ✓ 올바름 |
+|---|---|
+| 매 tick 새 워커 4명 분리해서 각각 `gather` 명령 | CC 의 rally 를 노드 위에 한 번만 설정 → 이후 produce 만 하면 자동 |
+| `setRally` 인자 이름을 `target` 으로 호출 | **`pos`** 입니다 (`target` 아님). 도구 시그니처: `{buildingId, pos: {x,y}}` |
+| Barracks rally 를 mineralNode 위에 두고 marine 채취 기대 | gather 는 worker 전용 — marine 은 단순히 그 셀 인접 walkable 로 `move` |
+| rally 좌표를 그냥 `{x: nodeCellX, y: nodeCellY}` (cell 단위) | 월드 px: `{x: cell*16+8, y: cell*16+8}` |
+| underConstruction depot 위에 rally 후 즉시 produce | 워커는 spawn 즉시 gather 시도 → depot 완성 전이면 거부됨. depot 완성 확인 후 setRally |
+
+---
+
+## 13. 응답 검증 체크리스트 (턴 종료 직전 자가 확인)
 
 - [ ] 발행한 모든 호출이 `rts__*` 도구 (move / attack / attackMove / gather / build / produce / setRally / cancel)
 - [ ] `Bash`/`Read`/`Write`/`Task`/`Edit` 등 무관한 도구 호출 0개
@@ -235,5 +294,6 @@ Reply with a JSON array of commands. ...
 - [ ] 좌표가 월드 px (move/attackMove/setRally) 또는 cell 0..127 (build) 로 올바른 단위
 - [ ] supplyDepot / refinery build 좌표가 host 자원의 cellX/cellY 와 일치
 - [ ] `cancel` 인자는 `entityId` 만 (배열 아님)
+- [ ] 새 워커/유닛에 매 tick `gather`/`move` 반복 명령 대신 **CC/Barracks rally** 설정 (§12) 활용 검토 — `setRally` 인자는 `pos` (not `target`)
 
 도구 인자 검증은 SDK 가 Zod 로 자동 — 잘못된 인자는 그 호출만 실패하고 다른 명령은 정상 발행됩니다. 다만 ID/좌표 검증은 게임 측 — 잘못된 ID 명령은 silently skip + warn-log.
