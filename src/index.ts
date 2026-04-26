@@ -730,7 +730,11 @@ async function main(): Promise<void> {
     channels.push(channel);
     await channel.connect();
   }
-  if (channels.length === 0) {
+  // HTTP API counts as a connection — clients call POST /api/agent-message
+  // directly, no messaging-platform channel required. Without this guard,
+  // an HTTP-only deployment (e.g. game integration) crash-loops here.
+  const httpApiEnabled = process.env.NANOCLAW_HTTP_ENABLED === '1';
+  if (channels.length === 0 && !httpApiEnabled) {
     logger.fatal('No channels connected');
     process.exit(1);
   }
