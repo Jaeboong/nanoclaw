@@ -48,6 +48,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { createHttpServer, HttpServer } from './http-server.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -568,6 +569,36 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
+/**
+ * Optionally start the synchronous HTTP API for realtime clients (e.g. RTS
+ * game). Default OFF — opt in by setting NANOCLAW_HTTP_ENABLED=1 and
+ * providing NANOCLAW_HTTP_TOKEN. Returns null when disabled.
+ */
+function maybeStartHttpServer(queue: GroupQueue): HttpServer | null {
+  const enabled = process.env.NANOCLAW_HTTP_ENABLED;
+  if (!enabled || enabled === '0' || enabled.toLowerCase() === 'false') {
+    return null;
+  }
+  const token = process.env.NANOCLAW_HTTP_TOKEN;
+  if (!token) {
+    logger.fatal(
+      'NANOCLAW_HTTP_ENABLED set but NANOCLAW_HTTP_TOKEN is missing — refusing to start an unauthenticated HTTP API',
+    );
+    process.exit(1);
+  }
+  const port = parseInt(process.env.NANOCLAW_HTTP_PORT || '4500', 10);
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+    logger.fatal({ port }, 'Invalid NANOCLAW_HTTP_PORT');
+    process.exit(1);
+  }
+  const server = createHttpServer({ token, port, queue });
+  server.start().catch((err) => {
+    logger.fatal({ err }, 'HTTP server failed to start');
+    process.exit(1);
+  });
+  return server;
+}
+
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
@@ -582,9 +613,18 @@ async function main(): Promise<void> {
 
   restoreRemoteControl();
 
+  const httpServer = maybeStartHttpServer(queue);
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    if (httpServer) {
+      try {
+        await httpServer.stop();
+      } catch (err) {
+        logger.warn({ err }, 'HTTP server stop failed');
+      }
+    }
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
