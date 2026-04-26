@@ -199,13 +199,17 @@ export class GroupQueue {
         }
       };
 
-      const timer = setTimeout(() => {
+      // Timer covers the agent execution window only — we (re)set it when the
+      // container actually spawns. Initial value covers the queue-wait period
+      // so a request that's stuck in pendingTasks forever still rejects.
+      let timer = setTimeout(onTimeout, timeoutMs);
+      function onTimeout(): void {
         if (settled) return;
         settled = true;
         ac.abort();
         releaseSlot();
         reject(new Error(`Agent response timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      }
 
       const taskFn = async (): Promise<void> => {
         if (settled) return; // Timed out before our turn — drop.
@@ -238,6 +242,12 @@ export class GroupQueue {
             },
             registerProcess: (proc, containerName) => {
               this.registerProcess(groupJid, proc, containerName, groupFolder);
+              // Reset the timer — the request was queued for an unknown
+              // duration, but the container only just started. Without this
+              // a queued request inherits the elapsed wait time and gets
+              // SIGKILL'd mid-LLM-response when its turn finally comes up.
+              clearTimeout(timer);
+              timer = setTimeout(onTimeout, timeoutMs);
             },
           });
           if (!settled) {
