@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -10,6 +11,27 @@ interface QueuedTask {
   groupJid: string;
   fn: () => Promise<void>;
 }
+
+/**
+ * Runner injected by the HTTP API path. Receives the group folder + prompt
+ * and emits chunks via onChunk for each non-null streamed result. Tests pass
+ * a fake; production passes a wrapper around runContainerAgent.
+ *
+ * The runner MUST call ctx.registerProcess as soon as it spawns a container,
+ * so the queue can kill it on timeout — otherwise the underlying
+ * container's 30-min idle timeout will keep the per-group slot busy long
+ * after the HTTP request has been resolved/rejected.
+ */
+export type AgentResponseRunner = (
+  groupFolder: string,
+  message: string,
+  ctx: {
+    onChunk: (chunk: string) => void;
+    signal: AbortSignal;
+    closeStdin: () => void;
+    registerProcess: (proc: ChildProcess, containerName: string) => void;
+  },
+) => Promise<void>;
 
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
@@ -129,6 +151,122 @@ export class GroupQueue {
     );
   }
 
+  /**
+   * HTTP request/response variant: serializes through the same per-group
+   * task queue as enqueueTask (concurrency 1 per group), but captures
+   * streamed agent output and resolves with the first non-null chunk.
+   *
+   * The runner is injected so tests can avoid spawning real containers.
+   * Returns the synthesized JID so callers can correlate with logs.
+   */
+  enqueueWithResponse(
+    groupFolder: string,
+    message: string,
+    timeoutMs: number,
+    runner: AgentResponseRunner,
+  ): Promise<string> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('GroupQueue is shutting down'));
+    }
+    if (timeoutMs <= 0) {
+      return Promise.reject(new Error('timeoutMs must be > 0'));
+    }
+
+    // Use a synthetic JID per group folder so this request is serialized with
+    // any other HTTP requests for the same group, but isolated from any
+    // channel-driven traffic that uses real chat JIDs.
+    const groupJid = `http:${groupFolder}`;
+    const taskId = `http-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let firstChunk: string | null = null;
+      const ac = new AbortController();
+
+      // killActive uses the process registered via ctx.registerProcess to
+      // hard-stop the container — without it the queue stays blocked behind
+      // the underlying 30-min idle timeout (see AgentResponseRunner doc).
+      const releaseSlot = (): void => {
+        try {
+          this.closeStdin(groupJid);
+        } catch {
+          // ignore
+        }
+        try {
+          this.killActive(groupJid);
+        } catch {
+          // ignore
+        }
+      };
+
+      // Timer covers the agent execution window only — we (re)set it when the
+      // container actually spawns. Initial value covers the queue-wait period
+      // so a request that's stuck in pendingTasks forever still rejects.
+      let timer = setTimeout(onTimeout, timeoutMs);
+      function onTimeout(): void {
+        if (settled) return;
+        settled = true;
+        ac.abort();
+        releaseSlot();
+        reject(new Error(`Agent response timed out after ${timeoutMs}ms`));
+      }
+
+      const taskFn = async (): Promise<void> => {
+        if (settled) return; // Timed out before our turn — drop.
+        try {
+          await runner(groupFolder, message, {
+            onChunk: (chunk) => {
+              if (settled) return;
+              if (firstChunk === null && chunk) {
+                firstChunk = chunk;
+                settled = true;
+                clearTimeout(timer);
+                // Got what we wanted — let the container shut down so the
+                // queue slot is freed for the next request. closeStdin alone
+                // would wait the full IDLE_TIMEOUT; we don't.
+                try {
+                  this.closeStdin(groupJid);
+                } catch {
+                  // ignore
+                }
+                resolve(firstChunk);
+              }
+            },
+            signal: ac.signal,
+            closeStdin: () => {
+              try {
+                this.closeStdin(groupJid);
+              } catch {
+                // ignore
+              }
+            },
+            registerProcess: (proc, containerName) => {
+              this.registerProcess(groupJid, proc, containerName, groupFolder);
+              // Reset the timer — the request was queued for an unknown
+              // duration, but the container only just started. Without this
+              // a queued request inherits the elapsed wait time and gets
+              // SIGKILL'd mid-LLM-response when its turn finally comes up.
+              clearTimeout(timer);
+              timer = setTimeout(onTimeout, timeoutMs);
+            },
+          });
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error('Agent produced no output'));
+          }
+        } catch (err) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+
+      this.enqueueTask(groupJid, taskId, taskFn);
+    }).then((value) => value as string);
+  }
+
   registerProcess(
     groupJid: string,
     proc: ChildProcess,
@@ -190,6 +328,38 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch {
       // ignore
+    }
+  }
+
+  /**
+   * Force-stop the active container for this JID. Used by enqueueWithResponse
+   * when an HTTP request times out — closeStdin alone may not be enough
+   * because the agent could be mid-tool-call and ignoring the sentinel,
+   * which would leave the per-group queue blocked behind a 30-min container
+   * timeout. Hard kill via runtime stop returns the slot immediately.
+   * No-op when no active container is registered.
+   */
+  killActive(groupJid: string): void {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.containerName) return;
+    try {
+      stopContainer(state.containerName);
+      logger.warn(
+        { groupJid, containerName: state.containerName },
+        'Container force-stopped (request timeout)',
+      );
+    } catch (err) {
+      logger.warn(
+        { groupJid, containerName: state.containerName, err },
+        'killActive: stopContainer failed',
+      );
+      if (state.process && !state.process.killed) {
+        try {
+          state.process.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+      }
     }
   }
 

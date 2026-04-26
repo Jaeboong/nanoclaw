@@ -13,10 +13,14 @@ logs/
 groups/*
 !groups/main/
 !groups/global/
+!groups/rts-ai/
 groups/main/*
 groups/global/*
+groups/rts-ai/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
+!groups/rts-ai/CLAUDE.md
+!groups/rts-ai/runtime-settings.json
 
 # Secrets
 *.keys.json

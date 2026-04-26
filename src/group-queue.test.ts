@@ -1,6 +1,8 @@
+import type { ChildProcess } from 'child_process';
+
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { GroupQueue } from './group-queue.js';
+import { AgentResponseRunner, GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -480,5 +482,114 @@ describe('GroupQueue', () => {
 
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
+  });
+});
+
+describe('GroupQueue.enqueueWithResponse', () => {
+  let queue: GroupQueue;
+
+  beforeEach(() => {
+    queue = new GroupQueue();
+  });
+
+  it('resolves with the first non-null streamed chunk', async () => {
+    const runner: AgentResponseRunner = async (_folder, _msg, ctx) => {
+      ctx.onChunk('first-output');
+      // Subsequent chunks must not change the resolved value.
+      ctx.onChunk('second-output');
+    };
+
+    const out = await queue.enqueueWithResponse(
+      'rts-ai',
+      'hello',
+      5_000,
+      runner,
+    );
+    expect(out).toBe('first-output');
+  });
+
+  it('rejects with timeout error when runner produces no output in time', async () => {
+    const runner: AgentResponseRunner = async (_folder, _msg, ctx) => {
+      // Block until aborted — never emit a chunk.
+      await new Promise<void>((resolve) => {
+        ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    await expect(
+      queue.enqueueWithResponse('rts-ai', 'hello', 50, runner),
+    ).rejects.toThrow(/timed out/i);
+  });
+
+  it('on timeout, kills the container so the queue slot frees immediately', async () => {
+    // Reproduces the production trap: without killActive, a stuck container
+    // would hold the slot until CONTAINER_TIMEOUT (~30 min) even though
+    // the HTTP request has rejected.
+    const killSpy = vi.spyOn(queue, 'killActive');
+
+    const runner: AgentResponseRunner = async (_folder, _msg, ctx) => {
+      // Pretend we spawned a container and registered it with the queue.
+      const fakeProc = { killed: false } as unknown as ChildProcess;
+      ctx.registerProcess(fakeProc, 'fake-container-name');
+      // Then hang until aborted (simulates a stuck agent).
+      await new Promise<void>((resolve) => {
+        ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    await expect(
+      queue.enqueueWithResponse('rts-ai', 'hello', 30, runner),
+    ).rejects.toThrow(/timed out/i);
+
+    expect(killSpy).toHaveBeenCalledWith('http:rts-ai');
+  });
+
+  it('rejects when the runner finishes without emitting any chunk', async () => {
+    const runner: AgentResponseRunner = async () => {
+      // returns immediately, no chunks
+    };
+
+    await expect(
+      queue.enqueueWithResponse('rts-ai', 'hello', 1_000, runner),
+    ).rejects.toThrow(/no output/i);
+  });
+
+  it('serializes 5 concurrent same-group requests (concurrency = 1)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let counter = 0;
+
+    const runner: AgentResponseRunner = async (_folder, _msg, ctx) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      // Real async tick so other queued tasks would run if concurrency allowed it.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      ctx.onChunk(`r-${++counter}`);
+      active--;
+    };
+
+    const promises = Array.from({ length: 5 }, () =>
+      queue.enqueueWithResponse('rts-ai', 'hello', 5_000, runner),
+    );
+    const results = await Promise.all(promises);
+
+    expect(maxActive).toBe(1);
+    expect(results).toEqual(['r-1', 'r-2', 'r-3', 'r-4', 'r-5']);
+  });
+
+  it('propagates runner errors as Promise rejections', async () => {
+    const runner: AgentResponseRunner = async () => {
+      throw new Error('boom');
+    };
+    await expect(
+      queue.enqueueWithResponse('rts-ai', 'hello', 1_000, runner),
+    ).rejects.toThrow('boom');
+  });
+
+  it('rejects when the queue is shut down', async () => {
+    await queue.shutdown(0);
+    await expect(
+      queue.enqueueWithResponse('rts-ai', 'hello', 1_000, async () => {}),
+    ).rejects.toThrow(/shutting down/i);
   });
 });
