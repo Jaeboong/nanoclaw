@@ -6,7 +6,7 @@ import {
   RTS_MCP_SERVER_NAME,
   RTS_TOOL_MODE_SYSTEM_APPEND,
   type AICommand,
-} from './rts-tools.js';
+} from '../src/rts-tools.js';
 
 describe('rts-tools constants', () => {
   it('exports the rts-ai group folder name and MCP server name', () => {
