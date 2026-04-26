@@ -116,6 +116,19 @@ function buildAuthMiddleware(token: string) {
 export const HTTP_CONTAINER_TIMEOUT_MS = 60_000;
 
 /**
+ * Per-groupFolder session id store. Each successful response carries a
+ * `newSessionId` from the Claude Agent SDK — by feeding it back into the
+ * NEXT call's `input.sessionId` we get true conversation continuity instead
+ * of a cold start every request. Without this, every HTTP request paid the
+ * full system-prompt + manual re-load cost (the very thing that made
+ * Nanoclaw preferable to `claude -p` in the first place).
+ *
+ * In-memory map is fine for a single-process service — restart loses the
+ * session, which is desirable (stale state shouldn't carry past restarts).
+ */
+const sessionIds = new Map<string, string>();
+
+/**
  * Production runner: spawn a container via runContainerAgent and forward
  * each non-null streamed `result.result` chunk to onChunk. Registers the
  * spawned process with the queue so an HTTP timeout can kill the container
@@ -142,10 +155,12 @@ export const defaultAgentRunner: AgentResponseRunner = async (
     containerConfig: { timeout: HTTP_CONTAINER_TIMEOUT_MS },
   };
 
-  await runContainerAgent(
+  const sessionId = sessionIds.get(groupFolder);
+  const result = await runContainerAgent(
     group,
     {
       prompt: message,
+      sessionId,
       groupFolder,
       chatJid: `http:${groupFolder}`,
       isMain: false,
@@ -160,6 +175,12 @@ export const defaultAgentRunner: AgentResponseRunner = async (
         // Propagate by throwing — the queue wrapper rejects the Promise.
         throw new Error(output.error || 'agent error');
       }
+      // Persist newSessionId mid-stream too — a multi-result response writes
+      // the session marker on the first chunk, and we don't want a connection
+      // drop after the agent answer to lose the session id.
+      if (output.newSessionId) {
+        sessionIds.set(groupFolder, output.newSessionId);
+      }
       if (output.result) {
         const text =
           typeof output.result === 'string'
@@ -169,7 +190,15 @@ export const defaultAgentRunner: AgentResponseRunner = async (
       }
     },
   );
+  if (result.newSessionId) {
+    sessionIds.set(groupFolder, result.newSessionId);
+  }
 };
+
+/** Test/admin helper: drop the cached sessionId so the next call starts fresh. */
+export function clearAgentSession(groupFolder: string): void {
+  sessionIds.delete(groupFolder);
+}
 
 export function createHttpServer(opts: HttpServerOptions): HttpServer {
   if (!opts.token) {
