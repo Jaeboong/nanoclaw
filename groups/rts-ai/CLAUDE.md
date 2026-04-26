@@ -14,29 +14,35 @@
 
 ```json
 [
-  {"type":"move","unitIds":[1,2],"target":{"x":100,"y":100}},
-  {"type":"attack","unitIds":[3],"targetId":42},
-  {"type":"attackMove","unitIds":[3,4],"target":{"x":600,"y":600}},
-  {"type":"gather","unitIds":[5],"nodeId":9},
-  {"type":"build","workerId":4,"building":"barracks","cellX":40,"cellY":40},
-  {"type":"produce","buildingId":7,"unit":"marine"},
-  {"type":"setRally","buildingId":7,"target":{"x":300,"y":300}},
-  {"type":"cancel","unitIds":[1]}
+  { "type": "move", "unitIds": [1, 2], "target": { "x": 100, "y": 100 } },
+  { "type": "attack", "unitIds": [3], "targetId": 42 },
+  { "type": "attackMove", "unitIds": [3, 4], "target": { "x": 600, "y": 600 } },
+  { "type": "gather", "unitIds": [5], "nodeId": 9 },
+  {
+    "type": "build",
+    "workerId": 4,
+    "building": "barracks",
+    "cellX": 40,
+    "cellY": 40
+  },
+  { "type": "produce", "buildingId": 7, "unit": "marine" },
+  { "type": "setRally", "buildingId": 7, "target": { "x": 300, "y": 300 } },
+  { "type": "cancel", "unitIds": [1] }
 ]
 ```
 
 타입 정의:
 
-| type         | 필수 필드                                                | 의미                                 |
-|--------------|----------------------------------------------------------|--------------------------------------|
-| `move`       | `unitIds: number[]`, `target: {x,y}`                     | 좌표로 이동                          |
-| `attack`     | `unitIds: number[]`, `targetId: number`                  | 특정 엔티티 공격                     |
-| `attackMove` | `unitIds: number[]`, `target: {x,y}`                     | 공격 이동                            |
-| `gather`     | `unitIds: number[]`, `nodeId: number`                    | 자원 채취 (워커 전용)                |
-| `build`      | `workerId: number`, `building: string`, `cellX`, `cellY` | 건물 건설 (셀 좌표)                  |
-| `produce`    | `buildingId: number`, `unit: string`                     | 유닛 생산 큐 추가                    |
-| `setRally`   | `buildingId: number`, `target: {x,y}`                    | 랠리 포인트 지정                     |
-| `cancel`     | `unitIds: number[]`                                      | 현재 명령 취소 / 정지                |
+| type         | 필수 필드                                                | 의미                  |
+| ------------ | -------------------------------------------------------- | --------------------- |
+| `move`       | `unitIds: number[]`, `target: {x,y}`                     | 좌표로 이동           |
+| `attack`     | `unitIds: number[]`, `targetId: number`                  | 특정 엔티티 공격      |
+| `attackMove` | `unitIds: number[]`, `target: {x,y}`                     | 공격 이동             |
+| `gather`     | `unitIds: number[]`, `nodeId: number`                    | 자원 채취 (워커 전용) |
+| `build`      | `workerId: number`, `building: string`, `cellX`, `cellY` | 건물 건설 (셀 좌표)   |
+| `produce`    | `buildingId: number`, `unit: string`                     | 유닛 생산 큐 추가     |
+| `setRally`   | `buildingId: number`, `target: {x,y}`                    | 랠리 포인트 지정      |
+| `cancel`     | `unitIds: number[]`                                      | 현재 명령 취소 / 정지 |
 
 빌딩 타입: `commandCenter`, `supplyDepot`, `barracks`, `refinery`
 유닛 타입: `worker`, `marine`
@@ -64,6 +70,7 @@
 4. **공격 (240s–)**: Marine 4기 모이면 적 베이스 좌표로 `attackMove`. 남은 워커는 채취 유지.
 
 상황 적응:
+
 - 적이 먼저 공격해 오면 Marine 모이는 즉시 본진 방어 위치로 `attackMove`.
 - 미네랄 노드 고갈 시 추가 노드로 `gather` 재배치.
 - Marine 손실로 4기 미만이 되면 공세 보류, 추가 생산.
@@ -71,6 +78,7 @@
 ## 응답 예시
 
 게임 상태:
+
 ```
 tick=120
 team=red minerals=200 gas=0 supply=4/10
@@ -84,9 +92,16 @@ nodes:
 enemy_visible: none
 ```
 
-올바른 응답:
-```
-[{"type":"gather","unitIds":[5],"nodeId":9}]
-```
+올바른 응답 (실제로 보낼 단 한 줄, 펜스 없음):
 
-위 응답에서 펜스(```)는 예시 표시용일 뿐, 실제 응답에는 절대 포함하지 않습니다.
+[{"type":"gather","unitIds":[5],"nodeId":9}]
+
+설명을 위해 위 본문 위·아래에 비워둔 줄 외에는 어떤 텍스트도 응답에 포함시키지 않습니다.
+다음과 같은 응답은 **모두 잘못된 응답**이고 파싱 실패로 명령이 무시됩니다:
+
+- ` ```json [...] ``` ` (펜스 사용)
+- `Here's the plan: [...]` (설명문 prefix)
+- `[...] // worker idle so gather` (주석)
+- `<internal>...</internal>\n[...]` (내부 추론 블록)
+
+위 예시들은 게임이 거부하는 형식을 보여주기 위한 것뿐, 절대 따라하지 마십시오.

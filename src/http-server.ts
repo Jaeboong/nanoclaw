@@ -108,9 +108,24 @@ function buildAuthMiddleware(token: string) {
 }
 
 /**
+ * Per-request hard cap on the container itself. The HTTP layer's timeoutMs
+ * is the *response* deadline; this is belt-and-suspenders so a runaway
+ * agent can't hold its slot for the default 30-min CONTAINER_TIMEOUT even
+ * if killActive somehow misses.
+ */
+export const HTTP_CONTAINER_TIMEOUT_MS = 60_000;
+
+/**
  * Production runner: spawn a container via runContainerAgent and forward
- * each non-null streamed `result.result` chunk to onChunk. Stops as soon
- * as the request side resolves (closeStdin is called by the queue wrapper).
+ * each non-null streamed `result.result` chunk to onChunk. Registers the
+ * spawned process with the queue so an HTTP timeout can kill the container
+ * and free the per-group slot for the next request — without this hookup
+ * the queue stalls behind the container's 30-min idle timeout.
+ *
+ * NOTE: ad-hoc RegisteredGroup is rebuilt per call. runContainerAgent
+ * mkdir's group dirs and copies skills on every spawn — wasteful for a 5s
+ * tick. Phase 40-B should switch to a long-lived agent session if this
+ * becomes the bottleneck.
  */
 export const defaultAgentRunner: AgentResponseRunner = async (
   groupFolder,
@@ -124,6 +139,7 @@ export const defaultAgentRunner: AgentResponseRunner = async (
     added_at: new Date().toISOString(),
     requiresTrigger: false,
     isMain: false,
+    containerConfig: { timeout: HTTP_CONTAINER_TIMEOUT_MS },
   };
 
   await runContainerAgent(
@@ -135,9 +151,8 @@ export const defaultAgentRunner: AgentResponseRunner = async (
       isMain: false,
       assistantName: ASSISTANT_NAME,
     },
-    () => {
-      // We don't need to register the process anywhere — the queue wrapper
-      // already owns the JID-level lifecycle (closeStdin, etc.).
+    (proc, containerName) => {
+      ctx.registerProcess(proc, containerName);
     },
     async (output) => {
       if (ctx.signal.aborted) return;

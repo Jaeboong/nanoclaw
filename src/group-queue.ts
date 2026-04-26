@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -15,6 +16,11 @@ interface QueuedTask {
  * Runner injected by the HTTP API path. Receives the group folder + prompt
  * and emits chunks via onChunk for each non-null streamed result. Tests pass
  * a fake; production passes a wrapper around runContainerAgent.
+ *
+ * The runner MUST call ctx.registerProcess as soon as it spawns a container,
+ * so the queue can kill it on timeout — otherwise the underlying
+ * container's 30-min idle timeout will keep the per-group slot busy long
+ * after the HTTP request has been resolved/rejected.
  */
 export type AgentResponseRunner = (
   groupFolder: string,
@@ -23,6 +29,7 @@ export type AgentResponseRunner = (
     onChunk: (chunk: string) => void;
     signal: AbortSignal;
     closeStdin: () => void;
+    registerProcess: (proc: ChildProcess, containerName: string) => void;
   },
 ) => Promise<void>;
 
@@ -175,16 +182,28 @@ export class GroupQueue {
       let settled = false;
       let firstChunk: string | null = null;
       const ac = new AbortController();
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        ac.abort();
-        // Best-effort graceful shutdown of the underlying container.
+
+      // killActive uses the process registered via ctx.registerProcess to
+      // hard-stop the container — without it the queue stays blocked behind
+      // the underlying 30-min idle timeout (see AgentResponseRunner doc).
+      const releaseSlot = (): void => {
         try {
           this.closeStdin(groupJid);
         } catch {
           // ignore
         }
+        try {
+          this.killActive(groupJid);
+        } catch {
+          // ignore
+        }
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        ac.abort();
+        releaseSlot();
         reject(new Error(`Agent response timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
@@ -198,7 +217,9 @@ export class GroupQueue {
                 firstChunk = chunk;
                 settled = true;
                 clearTimeout(timer);
-                // Tell the container it can wind down — we have what we need.
+                // Got what we wanted — let the container shut down so the
+                // queue slot is freed for the next request. closeStdin alone
+                // would wait the full IDLE_TIMEOUT; we don't.
                 try {
                   this.closeStdin(groupJid);
                 } catch {
@@ -214,6 +235,9 @@ export class GroupQueue {
               } catch {
                 // ignore
               }
+            },
+            registerProcess: (proc, containerName) => {
+              this.registerProcess(groupJid, proc, containerName, groupFolder);
             },
           });
           if (!settled) {
@@ -294,6 +318,38 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch {
       // ignore
+    }
+  }
+
+  /**
+   * Force-stop the active container for this JID. Used by enqueueWithResponse
+   * when an HTTP request times out — closeStdin alone may not be enough
+   * because the agent could be mid-tool-call and ignoring the sentinel,
+   * which would leave the per-group queue blocked behind a 30-min container
+   * timeout. Hard kill via runtime stop returns the slot immediately.
+   * No-op when no active container is registered.
+   */
+  killActive(groupJid: string): void {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.containerName) return;
+    try {
+      stopContainer(state.containerName);
+      logger.warn(
+        { groupJid, containerName: state.containerName },
+        'Container force-stopped (request timeout)',
+      );
+    } catch (err) {
+      logger.warn(
+        { groupJid, containerName: state.containerName, err },
+        'killActive: stopContainer failed',
+      );
+      if (state.process && !state.process.killed) {
+        try {
+          state.process.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+      }
     }
   }
 

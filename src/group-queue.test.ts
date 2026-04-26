@@ -1,3 +1,5 @@
+import type { ChildProcess } from 'child_process';
+
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 import { AgentResponseRunner, GroupQueue } from './group-queue.js';
@@ -517,6 +519,29 @@ describe('GroupQueue.enqueueWithResponse', () => {
     await expect(
       queue.enqueueWithResponse('rts-ai', 'hello', 50, runner),
     ).rejects.toThrow(/timed out/i);
+  });
+
+  it('on timeout, kills the container so the queue slot frees immediately', async () => {
+    // Reproduces the production trap: without killActive, a stuck container
+    // would hold the slot until CONTAINER_TIMEOUT (~30 min) even though
+    // the HTTP request has rejected.
+    const killSpy = vi.spyOn(queue, 'killActive');
+
+    const runner: AgentResponseRunner = async (_folder, _msg, ctx) => {
+      // Pretend we spawned a container and registered it with the queue.
+      const fakeProc = { killed: false } as unknown as ChildProcess;
+      ctx.registerProcess(fakeProc, 'fake-container-name');
+      // Then hang until aborted (simulates a stuck agent).
+      await new Promise<void>((resolve) => {
+        ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    await expect(
+      queue.enqueueWithResponse('rts-ai', 'hello', 30, runner),
+    ).rejects.toThrow(/timed out/i);
+
+    expect(killSpy).toHaveBeenCalledWith('http:rts-ai');
   });
 
   it('rejects when the runner finishes without emitting any chunk', async () => {
