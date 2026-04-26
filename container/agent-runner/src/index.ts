@@ -23,6 +23,13 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import {
+  createRtsAggregator,
+  formatRtsResult,
+  RTS_GROUP_FOLDER,
+  RTS_TOOL_MODE_SYSTEM_APPEND,
+  type RtsAggregator,
+} from './rts-tools.js';
 
 interface ContainerInput {
   prompt: string;
@@ -691,6 +698,25 @@ async function runQuery(
     );
   }
 
+  // RTS tool-call mode: the rts-ai group exposes the RTS AICommand schema as
+  // SDK MCP tools. Each tool call records into the aggregator; on each `result`
+  // message we emit JSON.stringify(commands) instead of the LLM's prose. This
+  // replaces the legacy "LLM emits a JSON array as plaintext" contract, which
+  // suffered from schema drift and forced single-shot reasoning compression.
+  // Only the rts-ai group sees the rts__* tools — other groups are unchanged.
+  const rtsAggregator: RtsAggregator | undefined =
+    containerInput.groupFolder === RTS_GROUP_FOLDER
+      ? createRtsAggregator()
+      : undefined;
+  if (rtsAggregator) {
+    log(
+      `RTS tool-call mode active (${rtsAggregator.allowedToolNames.length} tools)`,
+    );
+  }
+  const systemAppend =
+    (globalClaudeMd ?? '') +
+    (rtsAggregator ? RTS_TOOL_MODE_SYSTEM_APPEND : '');
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -700,11 +726,11 @@ async function runQuery(
       resumeSessionAt: resumeAt,
       ...(modelOverride ? { model: modelOverride } : {}),
       ...(effortOverride ? { effort: effortOverride } : {}),
-      systemPrompt: globalClaudeMd
+      systemPrompt: systemAppend
         ? {
             type: 'preset' as const,
             preset: 'claude_code' as const,
-            append: globalClaudeMd,
+            append: systemAppend,
           }
         : undefined,
       allowedTools: [
@@ -727,6 +753,7 @@ async function runQuery(
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+        ...(rtsAggregator ? rtsAggregator.allowedToolNames : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -742,6 +769,7 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(rtsAggregator ? { rts: rtsAggregator.mcpServer } : {}),
       },
       hooks: {
         PreCompact: [
@@ -838,12 +866,25 @@ async function runQuery(
       resultCount++;
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
-      log(
-        `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
-      );
+      // RTS mode: replace the LLM's prose with the harvested tool-call JSON.
+      // Drain on every result so a multi-turn session emits each tick's commands
+      // independently (legacy IPC follow-up flow still works).
+      let payload: string | null;
+      if (rtsAggregator) {
+        const drained = rtsAggregator.drain();
+        payload = formatRtsResult(drained);
+        log(
+          `Result #${resultCount}: subtype=${message.subtype} rts=${drained.length} command(s)`,
+        );
+      } else {
+        payload = textResult || null;
+        log(
+          `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
+        );
+      }
       writeOutput({
         status: 'success',
-        result: textResult || null,
+        result: payload,
         newSessionId,
       });
     }
