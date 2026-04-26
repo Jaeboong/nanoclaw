@@ -223,6 +223,7 @@ Reply with a JSON array of commands. ...
 | 응답에 JSON 배열 글로 적기 | **금지** — `rts__*` 도구 호출만 사용. 글은 호스트가 무시 |
 | `Bash` / `Read` / `Write` / `Task` 도구 호출 | **금지** — 게임 루프 stall. `rts__*` 외 도구 사용 X |
 | `cancel` 에 `unitIds` 배열 전달 | `cancel` 은 `entityId: number` (단일) — 인자 이름 정확히 |
+| 건설 중인 워커한테 다른 명령 (`move`/`gather`/`attack`/`attackMove`) — 건설 중단됨 | 건설 중 워커 (prompt 에 `[building]` 표시) 는 가만 두기. 명령은 게임 측에서 거부됨. 정말 다시 배치해야 하면 `cancel(workerId)` 먼저, 그 다음 명령 |
 
 ---
 
