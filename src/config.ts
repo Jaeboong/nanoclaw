@@ -11,6 +11,9 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'ONECLI_API_KEY',
   'TZ',
+  'WEBHOOK_PORT',
+  'WEBHOOK_TOKEN',
+  'WEBHOOK_GRAFANA_JID',
 ]);
 
 export const ASSISTANT_NAME =
@@ -71,7 +74,15 @@ function escapeRegex(str: string): string {
 }
 
 export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`^${escapeRegex(trigger.trim())}\\b`, 'i');
+  // Unicode-aware token boundary: the trigger must end the string OR be
+  // followed by a non-(letter/number/underscore). Plain `\b` only knows
+  // ASCII \w, so it misbehaves when a non-ASCII trigger like `@뚜잇봇`
+  // is followed by space — Korean syllables aren't \w, so there's no
+  // word↔non-word transition to satisfy `\b`.
+  return new RegExp(
+    `^${escapeRegex(trigger.trim())}(?=$|[^\\p{L}\\p{N}_])`,
+    'iu',
+  );
 }
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
@@ -97,3 +108,14 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// Webhook server (Grafana alerts → synthetic chat message).
+// Disabled when WEBHOOK_TOKEN or WEBHOOK_GRAFANA_JID is empty.
+export const WEBHOOK_PORT = parseInt(
+  process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '8090',
+  10,
+);
+export const WEBHOOK_TOKEN =
+  process.env.WEBHOOK_TOKEN || envConfig.WEBHOOK_TOKEN || '';
+export const WEBHOOK_GRAFANA_JID =
+  process.env.WEBHOOK_GRAFANA_JID || envConfig.WEBHOOK_GRAFANA_JID || '';

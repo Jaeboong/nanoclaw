@@ -13,6 +13,9 @@ import {
   ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
+  WEBHOOK_GRAFANA_JID,
+  WEBHOOK_PORT,
+  WEBHOOK_TOKEN,
 } from './config.js';
 import './channels/index.js';
 import {
@@ -46,8 +49,10 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import { BgTaskRegistry } from './bg-task-registry.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { groupNamespace } from './ipc-namespace.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -69,6 +74,7 @@ import {
 } from './session-commands.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { startWebhookServer } from './webhook-server.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -82,6 +88,7 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const bgRegistry = new BgTaskRegistry();
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -245,26 +252,35 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (missedMessages.length === 0) return true;
 
   // --- Session command interception (before trigger check) ---
+  const groupTriggerPattern = getTriggerPattern(group.trigger);
   const cmdResult = await handleSessionCommand({
     missedMessages,
     isMainGroup,
     groupName: group.name,
-    triggerPattern: TRIGGER_PATTERN,
+    triggerPattern: groupTriggerPattern,
     timezone: TIMEZONE,
     deps: {
       sendMessage: (text) => channel.sendMessage(chatJid, text),
-      setTyping: (typing) => channel.setTyping?.(chatJid, typing) ?? Promise.resolve(),
-      runAgent: (prompt, onOutput) => runAgent(group, prompt, chatJid, onOutput),
+      setTyping: (typing) =>
+        channel.setTyping?.(chatJid, typing) ?? Promise.resolve(),
+      runAgent: (prompt, onOutput) =>
+        runAgent(group, prompt, chatJid, onOutput),
       closeStdin: () => queue.closeStdin(chatJid),
-      advanceCursor: (ts) => { lastAgentTimestamp[chatJid] = ts; saveState(); },
+      advanceCursor: (ts) => {
+        lastAgentTimestamp[chatJid] = ts;
+        saveState();
+      },
       formatMessages,
       canSenderInteract: (msg) => {
-        const hasTrigger = TRIGGER_PATTERN.test(msg.content.trim());
+        const hasTrigger = groupTriggerPattern.test(msg.content.trim());
         const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
-        return isMainGroup || !reqTrigger || (hasTrigger && (
-          msg.is_from_me ||
-          isTriggerAllowed(chatJid, msg.sender, loadSenderAllowlist())
-        ));
+        return (
+          isMainGroup ||
+          !reqTrigger ||
+          (hasTrigger &&
+            (msg.is_from_me ||
+              isTriggerAllowed(chatJid, msg.sender, loadSenderAllowlist())))
+        );
       },
     },
   });
@@ -381,8 +397,9 @@ async function runAgent(
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
+  const groupNs = groupNamespace(group.folder);
   writeTasksSnapshot(
-    group.folder,
+    groupNs,
     isMain,
     tasks.map((t) => ({
       id: t.id,
@@ -399,7 +416,7 @@ async function runAgent(
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
-    group.folder,
+    groupNs,
     isMain,
     availableGroups,
     new Set(Object.keys(registeredGroups)),
@@ -522,15 +539,22 @@ async function startMessageLoop(): Promise<void> {
 
           // --- Session command interception (message loop) ---
           // Scan ALL messages in the batch for a session command.
+          const loopTriggerPattern = getTriggerPattern(group.trigger);
           const loopCmdMsg = groupMessages.find(
-            (m) => extractSessionCommand(m.content, TRIGGER_PATTERN) !== null,
+            (m) =>
+              extractSessionCommand(m.content, loopTriggerPattern) !== null,
           );
 
           if (loopCmdMsg) {
             // Only close active container if the sender is authorized — otherwise an
             // untrusted user could kill in-flight work by sending /compact (DoS).
             // closeStdin no-ops internally when no container is active.
-            if (isSessionCommandAllowed(isMainGroup, loopCmdMsg.is_from_me === true)) {
+            if (
+              isSessionCommandAllowed(
+                isMainGroup,
+                loopCmdMsg.is_from_me === true,
+              )
+            ) {
               queue.closeStdin(chatJid);
             }
             // Enqueue so processGroupMessages handles auth + cursor advancement.
@@ -756,6 +780,7 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
+    bgRegistry,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
@@ -789,8 +814,8 @@ async function main(): Promise<void> {
       );
     },
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) =>
-      writeGroupsSnapshot(gf, im, ag, rj),
+    writeGroupsSnapshot: (folder, im, ag, rj) =>
+      writeGroupsSnapshot(groupNamespace(folder), im, ag, rj),
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({
@@ -804,11 +829,29 @@ async function main(): Promise<void> {
         next_run: t.next_run,
       }));
       for (const group of Object.values(registeredGroups)) {
-        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
+        writeTasksSnapshot(
+          groupNamespace(group.folder),
+          group.isMain === true,
+          taskRows,
+        );
       }
     },
+    bgRegistry,
   });
   startSessionCleanup();
+  if (WEBHOOK_TOKEN && WEBHOOK_GRAFANA_JID) {
+    startWebhookServer({
+      port: WEBHOOK_PORT,
+      token: WEBHOOK_TOKEN,
+      grafanaJid: WEBHOOK_GRAFANA_JID,
+      grafanaChatName: '두잇뚜 #grafana',
+      triggerPrefix: DEFAULT_TRIGGER,
+    });
+  } else {
+    logger.info(
+      'Webhook server skipped (WEBHOOK_TOKEN/WEBHOOK_GRAFANA_JID not set)',
+    );
+  }
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

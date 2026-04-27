@@ -31,6 +31,7 @@ import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
   MessageMetadata,
+  NewMessage,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -52,10 +53,18 @@ export class DiscordChannel implements Channel {
   // jid → status message id currently being edited in place.
   // Populated by sendStatus, cleared (with delete()) at sendMessage entry.
   private statusMessages = new Map<string, string>();
+  // Channel JID for the Grafana monitoring group. /daily /weekly /monthly
+  // slash commands are restricted to this channel. Null = commands disabled.
+  private grafanaJid: string | null;
 
-  constructor(botToken: string, opts: DiscordChannelOpts) {
+  constructor(
+    botToken: string,
+    opts: DiscordChannelOpts,
+    grafanaJid?: string,
+  ) {
     this.botToken = botToken;
     this.opts = opts;
+    this.grafanaJid = grafanaJid ?? null;
   }
 
   async connect(): Promise<void> {
@@ -204,18 +213,20 @@ export class DiscordChannel implements Channel {
       logger.error({ err: err.message }, 'Discord client error');
     });
 
-    // Slash command handlers (/model, /effort) — runtime-only, no rebuild needed
+    // Slash command handlers (/model, /effort, /compact, /daily, /weekly, /monthly)
     this.client.on(
       Events.InteractionCreate,
       async (interaction: Interaction) => {
         if (!interaction.isChatInputCommand()) return;
-        if (
-          interaction.commandName !== 'model' &&
-          interaction.commandName !== 'effort'
-        ) {
+        const cmd = interaction.commandName;
+        if (cmd === 'model' || cmd === 'effort' || cmd === 'compact') {
+          await this.handleRuntimeCommand(interaction);
           return;
         }
-        await this.handleRuntimeCommand(interaction);
+        if (cmd === 'daily' || cmd === 'weekly' || cmd === 'monthly') {
+          await this.handleGrafanaSummaryCommand(interaction, cmd);
+          return;
+        }
       },
     );
 
@@ -271,9 +282,68 @@ export class DiscordChannel implements Channel {
             ),
         )
         .toJSON(),
+      new SlashCommandBuilder()
+        .setName('compact')
+        .setDescription(
+          '이 채널의 대화 세션을 압축 (컨텍스트 로트 방지) — main/admin 전용',
+        )
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('daily')
+        .setDescription('일간 메트릭 요약 즉시 실행 (#grafana 전용)')
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('weekly')
+        .setDescription('주간 트렌드 요약 즉시 실행 (#grafana 전용)')
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('monthly')
+        .setDescription('월간 SLI 리뷰 즉시 실행 (#grafana 전용)')
+        .toJSON(),
     ];
-    await this.client.application.commands.set(commands);
-    logger.info('Slash commands registered globally');
+
+    // Clear any lingering global registrations from previous versions —
+    // otherwise they show up as duplicates alongside the guild-scoped ones.
+    try {
+      await this.client.application.commands.set([]);
+      logger.info('Cleared global slash command registrations');
+    } catch (err) {
+      logger.warn({ err }, 'Failed to clear global slash commands');
+    }
+
+    // Register per-guild for instant visibility. Also covers guilds the bot
+    // joins later via the guildCreate handler set up below.
+    for (const [guildId, guild] of this.client.guilds.cache) {
+      try {
+        await guild.commands.set(commands);
+        logger.info(
+          { guildId, guildName: guild.name },
+          'Slash commands registered for guild',
+        );
+      } catch (err) {
+        logger.warn(
+          { guildId, err },
+          'Failed to register slash commands for guild',
+        );
+      }
+    }
+
+    // Re-register when the bot joins a new guild so /compact etc. work
+    // immediately in new servers without waiting for global propagation.
+    this.client.on(Events.GuildCreate, async (guild) => {
+      try {
+        await guild.commands.set(commands);
+        logger.info(
+          { guildId: guild.id, guildName: guild.name },
+          'Slash commands registered for newly-joined guild',
+        );
+      } catch (err) {
+        logger.warn(
+          { guildId: guild.id, err },
+          'Failed to register slash commands for new guild',
+        );
+      }
+    });
   }
 
   private async handleRuntimeCommand(
@@ -324,6 +394,45 @@ export class DiscordChannel implements Channel {
         });
         return;
       }
+      if (interaction.commandName === 'compact') {
+        // Trigger the host-side session-command interception by injecting a
+        // synthetic "/compact" message as if the admin had typed it. The
+        // orchestrator's handleSessionCommand picks it up and runs the SDK
+        // /compact flow in a fresh container (transcript archived via the
+        // PreCompact hook). Only the device owner can drive this path.
+        const userId = interaction.user.id;
+        const ownerId = process.env.DISCORD_OWNER_ID;
+        const isOwner = ownerId ? userId === ownerId : false;
+        if (!isOwner && !group.isMain) {
+          await interaction.reply({
+            content: 'Session commands require admin access.',
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        await interaction.reply({
+          content: '세션 압축 시작 — 끝나면 채널에 결과 메시지 올라올게.',
+          flags: MessageFlags.Ephemeral,
+        });
+
+        const now = new Date().toISOString();
+        const synthetic: NewMessage = {
+          id: `compact-${Date.now()}`,
+          chat_jid: chatJid,
+          sender: userId,
+          sender_name: interaction.user.username,
+          content: '/compact',
+          timestamp: now,
+          is_from_me: true,
+        };
+        // Channels deliver inbound messages via opts.onInboundMessage — same
+        // path a real Discord message would take, so the orchestrator's
+        // session-command interception (handleSessionCommand) triggers.
+        this.opts.onChatMetadata(chatJid, now);
+        this.opts.onMessage(chatJid, synthetic);
+        return;
+      }
     } catch (err) {
       logger.error(
         { err, commandName: interaction.commandName },
@@ -338,6 +447,56 @@ export class DiscordChannel implements Channel {
           .catch(() => {});
       }
     }
+  }
+
+  private async handleGrafanaSummaryCommand(
+    interaction: import('discord.js').ChatInputCommandInteraction,
+    kind: 'daily' | 'weekly' | 'monthly',
+  ): Promise<void> {
+    const channelJid = `dc:${interaction.channelId}`;
+    if (!this.grafanaJid || channelJid !== this.grafanaJid) {
+      await interaction.reply({
+        content: `\`/${kind}\` 명령은 #grafana 모니터링 채널에서만 사용할 수 있습니다.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const labels = { daily: '일간', weekly: '주간', monthly: '월간' };
+    const label = labels[kind];
+
+    const promptMap: Record<typeof kind, string> = {
+      daily: `@${ASSISTANT_NAME} /daily — 지난 24시간 일간 메트릭 요약을 한국어 마크다운으로 작성해 채널에 게시. 포함: 총 요청량, 5xx 비율, p95/p99 latency, 다운타임 분, 발화한 알람 수/이름.`,
+      weekly: `@${ASSISTANT_NAME} /weekly — 지난 7일 주간 트렌드 요약을 한국어 마크다운으로 작성해 채널에 게시. 일별 평균/최댓값, 전주 대비 ±%, 워스트 케이스 시점, 발화 알람 목록.`,
+      monthly: `@${ASSISTANT_NAME} /monthly — 지난 30일 월간 SLI 리뷰를 한국어 마크다운으로 작성해 채널에 게시. 가용성(uptime%), 5xx 분포, p95/p99 latency 분포, 알람 타임라인, 주요 인시던트 회고.`,
+    };
+
+    await interaction.reply({
+      content: `🔄 ${label} 요약 시작합니다. 잠시만 기다려주세요.`,
+      flags: MessageFlags.Ephemeral,
+    });
+
+    const now = new Date().toISOString();
+    const senderName =
+      interaction.member?.user?.username ??
+      interaction.user.displayName ??
+      interaction.user.username;
+    const msg: NewMessage = {
+      id: `slash-${kind}-${Date.now()}`,
+      chat_jid: channelJid,
+      sender: interaction.user.id,
+      sender_name: senderName,
+      content: promptMap[kind],
+      timestamp: now,
+      is_from_me: true,
+      is_bot_message: false,
+    };
+    this.opts.onMessage(channelJid, msg);
+
+    logger.info(
+      { kind, channelJid, sender: senderName, msgId: msg.id },
+      'Grafana summary slash command dispatched',
+    );
   }
 
   async sendStatus(jid: string, text: string): Promise<void> {
@@ -498,12 +657,14 @@ export class DiscordChannel implements Channel {
 }
 
 registerChannel('discord', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['DISCORD_BOT_TOKEN']);
+  const envVars = readEnvFile(['DISCORD_BOT_TOKEN', 'WEBHOOK_GRAFANA_JID']);
   const token =
     process.env.DISCORD_BOT_TOKEN || envVars.DISCORD_BOT_TOKEN || '';
   if (!token) {
     logger.warn('Discord: DISCORD_BOT_TOKEN not set');
     return null;
   }
-  return new DiscordChannel(token, opts);
+  const grafanaJid =
+    process.env.WEBHOOK_GRAFANA_JID || envVars.WEBHOOK_GRAFANA_JID || undefined;
+  return new DiscordChannel(token, opts, grafanaJid);
 });
