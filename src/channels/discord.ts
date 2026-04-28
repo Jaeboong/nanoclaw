@@ -57,11 +57,7 @@ export class DiscordChannel implements Channel {
   // slash commands are restricted to this channel. Null = commands disabled.
   private grafanaJid: string | null;
 
-  constructor(
-    botToken: string,
-    opts: DiscordChannelOpts,
-    grafanaJid?: string,
-  ) {
+  constructor(botToken: string, opts: DiscordChannelOpts, grafanaJid?: string) {
     this.botToken = botToken;
     this.opts = opts;
     this.grafanaJid = grafanaJid ?? null;

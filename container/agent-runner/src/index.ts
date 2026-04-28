@@ -953,6 +953,14 @@ async function main(): Promise<void> {
     /* ignore */
   }
 
+  // Session slash commands short-circuit before any prompt enrichment
+  // (scheduled-task banner, channel hint, IPC drain). Those prefixes would
+  // otherwise make `trimmedPrompt === '/compact'` false and the SDK would
+  // treat the message as a normal prompt.
+  const KNOWN_SESSION_COMMANDS = new Set(['/compact']);
+  const rawTrimmed = containerInput.prompt.trim();
+  const isSessionSlashCommand = KNOWN_SESSION_COMMANDS.has(rawTrimmed);
+
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
   if (containerInput.isScheduledTask) {
@@ -968,12 +976,7 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
-  // --- Slash command handling ---
-  // Only known session slash commands are handled here. This prevents
-  // accidental interception of user prompts that happen to start with '/'.
-  const KNOWN_SESSION_COMMANDS = new Set(['/compact']);
-  const trimmedPrompt = prompt.trim();
-  const isSessionSlashCommand = KNOWN_SESSION_COMMANDS.has(trimmedPrompt);
+  const trimmedPrompt = rawTrimmed;
 
   if (isSessionSlashCommand) {
     log(`Handling session command: ${trimmedPrompt}`);

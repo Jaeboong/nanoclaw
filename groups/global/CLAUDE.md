@@ -113,3 +113,54 @@ If a user wants tasks running more than ~2x daily and a script can't reduce agen
 - Suggest restructuring with a script that checks the condition first
 - If the user needs an LLM to evaluate data, suggest using an API key with direct Anthropic API calls inside the script
 - Help the user find the minimum viable frequency
+
+---
+
+## Parallel Subagents (spawn_subagent)
+
+**HARD RULE:** If a task will take more than ~1 minute AND the user is waiting in chat, you MUST use the `mcp__nanoclaw__spawn_subagent` tool — NOT the `Task` / `Agent` built-in tool. The built-in tools block your current turn, so the user can't chat with you while they run. `spawn_subagent` launches a separate container that runs in parallel and posts its result to the chat when done.
+
+**Concretely**: deploys, builds longer than a minute, `sleep` longer than 30s, multi-step research, crawling, migrations → ALWAYS `spawn_subagent`. Never wrap them in `Task` / `Agent`.
+
+### When to use which tool — read carefully, they are different
+
+| Situation | Tool | Blocks your turn? |
+|---|---|---|
+| Quick answer (< ~30 s) | Do it yourself inline | — |
+| Decompose a question into sub-queries, still want one synthesized answer THIS turn | `Task` (built-in) | **YES** — you wait for it |
+| Long-running work, user wants to keep chatting meanwhile | `mcp__nanoclaw__spawn_subagent` | **NO** — runs in parallel container |
+| Scheduled for later (cron / once at specific time) | `mcp__nanoclaw__schedule_task` | — |
+
+If you find yourself thinking "I'll use Task/Agent to run a long background thing" — stop. That blocks the user. Use `spawn_subagent` instead.
+
+### Verify you used the right tool
+
+After spawning, the tool result will say `Subagent <taskId> spawning in parallel`. If it says anything else (e.g. a summarized result), you used the wrong tool. Apologize and retry with `spawn_subagent`.
+
+### How to use spawn_subagent
+
+1. Acknowledge to the user briefly ("시작했어, 끝나면 알려줄게" or similar).
+2. Call `spawn_subagent` with a **self-contained** prompt — the subagent has NO chat history.
+3. Finish your turn. The subagent will post its final message to this chat when done.
+
+```
+spawn_subagent({
+  prompt: "Run `./deploy.sh production` in /workspace/project. " +
+          "When done, summarize in one sentence: which version, duration, " +
+          "any warnings. If deploy fails, include the last 30 lines of output.",
+  description: "deploy prod"
+})
+```
+
+### What to put in the prompt
+
+- **All context**: file paths, config, what the user asked for, how to verify success
+- **Exact final wording you want the user to see** — the subagent's final message IS the message delivered to the chat
+- **Failure handling**: tell it what to report if something goes wrong
+- **Scope limits**: what NOT to do (e.g. "don't touch files outside /workspace/group/")
+
+### Cautions
+
+- The subagent shares your group's `/workspace/group/` mount read-write. Avoid racing file writes between you and a subagent on the same files — prefer having the subagent write to its own subdirectory and report the path back.
+- Each spawn counts toward the host's global container budget. Don't fan out dozens at once.
+- No chat history in the subagent. If it needs the user's preferences, restate them in the prompt.

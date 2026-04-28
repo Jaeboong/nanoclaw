@@ -11,6 +11,19 @@ interface QueuedTask {
   fn: () => Promise<void>;
 }
 
+interface QueuedParallelTask {
+  taskId: string;
+  groupJid: string;
+  fn: () => Promise<void>;
+}
+
+interface ParallelJobState {
+  taskId: string;
+  groupJid: string;
+  process: ChildProcess | null;
+  containerName: string | null;
+}
+
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 
@@ -34,6 +47,11 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  // Parallel jobs (e.g. spawn_subagent) live outside the per-group exclusive
+  // slot. They share the global MAX_CONCURRENT_CONTAINERS budget with group
+  // containers but do not block the group's main conversation.
+  private parallelJobs = new Map<string, ParallelJobState>();
+  private pendingParallelJobs: QueuedParallelTask[] = [];
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -139,6 +157,73 @@ export class GroupQueue {
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+  }
+
+  /**
+   * Enqueue a parallel (non-blocking, isolated) task. Unlike enqueueTask,
+   * this does NOT block the originating group's main container — the group
+   * can keep accepting user messages while the task runs. The only shared
+   * constraint is the global MAX_CONCURRENT_CONTAINERS budget.
+   */
+  enqueueParallelTask(
+    groupJid: string,
+    taskId: string,
+    fn: () => Promise<void>,
+  ): void {
+    if (this.shuttingDown) return;
+
+    if (
+      this.parallelJobs.has(taskId) ||
+      this.pendingParallelJobs.some((t) => t.taskId === taskId)
+    ) {
+      logger.debug(
+        { groupJid, taskId },
+        'Parallel task already active or queued, skipping',
+      );
+      return;
+    }
+
+    if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
+      this.pendingParallelJobs.push({ taskId, groupJid, fn });
+      logger.debug(
+        { groupJid, taskId, activeCount: this.activeCount },
+        'At concurrency limit, parallel task queued',
+      );
+      return;
+    }
+
+    this.runParallelTask({ taskId, groupJid, fn }).catch((err) =>
+      logger.error(
+        { groupJid, taskId, err },
+        'Unhandled error in runParallelTask',
+      ),
+    );
+  }
+
+  /**
+   * Register the spawned process for a parallel task. Separate from the
+   * group's single-slot registerProcess so a parallel container does not
+   * clobber the group's main container handle.
+   */
+  registerParallelProcess(
+    taskId: string,
+    proc: ChildProcess,
+    containerName: string,
+  ): void {
+    const state = this.parallelJobs.get(taskId);
+    if (!state) {
+      logger.debug(
+        { taskId },
+        'registerParallelProcess called for unknown parallel task',
+      );
+      return;
+    }
+    state.process = proc;
+    state.containerName = containerName;
+  }
+
+  hasParallelJob(taskId: string): boolean {
+    return this.parallelJobs.has(taskId);
   }
 
   /**
@@ -260,6 +345,57 @@ export class GroupQueue {
     }
   }
 
+  private async runParallelTask(task: QueuedParallelTask): Promise<void> {
+    this.parallelJobs.set(task.taskId, {
+      taskId: task.taskId,
+      groupJid: task.groupJid,
+      process: null,
+      containerName: null,
+    });
+    this.activeCount++;
+
+    logger.debug(
+      {
+        groupJid: task.groupJid,
+        taskId: task.taskId,
+        activeCount: this.activeCount,
+      },
+      'Running parallel task',
+    );
+
+    try {
+      await task.fn();
+    } catch (err) {
+      logger.error(
+        { groupJid: task.groupJid, taskId: task.taskId, err },
+        'Error running parallel task',
+      );
+    } finally {
+      this.parallelJobs.delete(task.taskId);
+      this.activeCount--;
+      // Give queued parallel work a shot first, then let group work drain
+      // into any freed slot.
+      this.drainParallel();
+      this.drainWaiting();
+    }
+  }
+
+  private drainParallel(): void {
+    if (this.shuttingDown) return;
+    while (
+      this.pendingParallelJobs.length > 0 &&
+      this.activeCount < MAX_CONCURRENT_CONTAINERS
+    ) {
+      const task = this.pendingParallelJobs.shift()!;
+      this.runParallelTask(task).catch((err) =>
+        logger.error(
+          { groupJid: task.groupJid, taskId: task.taskId, err },
+          'Unhandled error in runParallelTask (drain)',
+        ),
+      );
+    }
+  }
+
   private scheduleRetry(groupJid: string, state: GroupState): void {
     state.retryCount++;
     if (state.retryCount > MAX_RETRIES) {
@@ -354,6 +490,11 @@ export class GroupQueue {
     for (const [_jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
         activeContainers.push(state.containerName);
+      }
+    }
+    for (const [_taskId, job] of this.parallelJobs) {
+      if (job.process && !job.process.killed && job.containerName) {
+        activeContainers.push(job.containerName);
       }
     }
 

@@ -7,6 +7,7 @@ import {
   rejectionSummary,
   resolveAttachmentPaths,
 } from './attachment-paths.js';
+import { BgTaskRegistry } from './bg-task-registry.js';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -35,6 +36,8 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  /** Registry of active bg (parallel subagent) namespaces to also scan. */
+  bgRegistry: BgTaskRegistry;
 }
 
 let ipcWatcherRunning = false;
@@ -73,150 +76,19 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     for (const sourceGroup of groupFolders) {
       const isMain = folderIsMain.get(sourceGroup) === true;
-      const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+      const groupDir = path.join(ipcBaseDir, sourceGroup);
+      await scanNamespace(groupDir, sourceGroup, isMain, deps);
+    }
 
-      // Process messages from this group's IPC directory
-      try {
-        if (fs.existsSync(messagesDir)) {
-          const messageFiles = fs
-            .readdirSync(messagesDir)
-            .filter((f) => f.endsWith('.json'));
-          for (const file of messageFiles) {
-            const filePath = path.join(messagesDir, file);
-            try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'status' && data.chatJid && data.text) {
-                // Authorization: same check as regular messages — source
-                // group must own the target chat, or be main.
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  await deps.sendStatus(data.chatJid, data.text);
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC status attempt blocked',
-                  );
-                }
-                fs.unlinkSync(filePath);
-                continue;
-              }
-              if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  // Translate container attachment paths to host paths.
-                  // Rejected files (too large, out of scope, etc.) are
-                  // surfaced to the user as a Korean notice appended to
-                  // the message text — never silently dropped.
-                  let hostFiles: string[] | undefined;
-                  let outboundText: string = data.text;
-                  if (Array.isArray(data.files) && data.files.length > 0) {
-                    const sourceGroupEntry = Object.values(
-                      registeredGroups,
-                    ).find((g) => g.folder === sourceGroup);
-                    if (sourceGroupEntry) {
-                      const batch = resolveAttachmentPaths(
-                        data.files.filter(
-                          (f: unknown): f is string => typeof f === 'string',
-                        ),
-                        sourceGroupEntry,
-                      );
-                      hostFiles =
-                        batch.resolved.length > 0 ? batch.resolved : undefined;
-                      if (batch.rejections.length > 0) {
-                        const lines = batch.rejections
-                          .map((r) => `• ${rejectionSummary(r)}`)
-                          .join('\n');
-                        outboundText =
-                          (outboundText ? outboundText + '\n\n' : '') +
-                          `⚠️ 첨부 전송 실패:\n${lines}`;
-                      }
-                    }
-                  }
-                  const metadata: MessageMetadata | undefined =
-                    data.metadata && typeof data.metadata === 'object'
-                      ? (data.metadata as MessageMetadata)
-                      : undefined;
-                  await deps.sendMessage(
-                    data.chatJid,
-                    outboundText,
-                    hostFiles,
-                    metadata,
-                  );
-                  logger.info(
-                    {
-                      chatJid: data.chatJid,
-                      sourceGroup,
-                      fileCount: hostFiles?.length ?? 0,
-                    },
-                    'IPC message sent',
-                  );
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
-                  );
-                }
-              }
-              fs.unlinkSync(filePath);
-            } catch (err) {
-              logger.error(
-                { file, sourceGroup, err },
-                'Error processing IPC message',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
-            }
-          }
-        }
-      } catch (err) {
-        logger.error(
-          { err, sourceGroup },
-          'Error reading IPC messages directory',
-        );
-      }
-
-      // Process tasks from this group's IPC directory
-      try {
-        if (fs.existsSync(tasksDir)) {
-          const taskFiles = fs
-            .readdirSync(tasksDir)
-            .filter((f) => f.endsWith('.json'));
-          for (const file of taskFiles) {
-            const filePath = path.join(tasksDir, file);
-            try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
-              fs.unlinkSync(filePath);
-            } catch (err) {
-              logger.error(
-                { file, sourceGroup, err },
-                'Error processing IPC task',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
-            }
-          }
-        }
-      } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
-      }
+    // Also scan bg (parallel subagent) namespaces. Each bg task mounts its
+    // own messages/ and tasks/ directory; the registry tells us where.
+    for (const entry of deps.bgRegistry.list()) {
+      await scanNamespace(
+        entry.namespace.hostPath,
+        entry.groupFolder,
+        entry.isMain,
+        deps,
+      );
     }
 
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
@@ -224,6 +96,144 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+}
+
+/**
+ * Scan one IPC namespace directory (either a group's shared dir or a bg
+ * task's isolated dir). Dispatches message/status IPCs and task IPCs using
+ * the same authorization rules — the caller supplies the verified
+ * sourceGroup and isMain so callers don't need to re-derive them.
+ */
+async function scanNamespace(
+  namespaceDir: string,
+  sourceGroup: string,
+  isMain: boolean,
+  deps: IpcDeps,
+): Promise<void> {
+  const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+  const messagesDir = path.join(namespaceDir, 'messages');
+  const tasksDir = path.join(namespaceDir, 'tasks');
+  const registeredGroups = deps.registeredGroups();
+
+  try {
+    if (fs.existsSync(messagesDir)) {
+      const messageFiles = fs
+        .readdirSync(messagesDir)
+        .filter((f) => f.endsWith('.json'));
+      for (const file of messageFiles) {
+        const filePath = path.join(messagesDir, file);
+        try {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          if (data.type === 'status' && data.chatJid && data.text) {
+            const targetGroup = registeredGroups[data.chatJid];
+            if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+              await deps.sendStatus(data.chatJid, data.text);
+            } else {
+              logger.warn(
+                { chatJid: data.chatJid, sourceGroup },
+                'Unauthorized IPC status attempt blocked',
+              );
+            }
+            fs.unlinkSync(filePath);
+            continue;
+          }
+          if (data.type === 'message' && data.chatJid && data.text) {
+            const targetGroup = registeredGroups[data.chatJid];
+            if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+              let hostFiles: string[] | undefined;
+              let outboundText: string = data.text;
+              if (Array.isArray(data.files) && data.files.length > 0) {
+                const sourceGroupEntry = Object.values(registeredGroups).find(
+                  (g) => g.folder === sourceGroup,
+                );
+                if (sourceGroupEntry) {
+                  const batch = resolveAttachmentPaths(
+                    data.files.filter(
+                      (f: unknown): f is string => typeof f === 'string',
+                    ),
+                    sourceGroupEntry,
+                  );
+                  hostFiles =
+                    batch.resolved.length > 0 ? batch.resolved : undefined;
+                  if (batch.rejections.length > 0) {
+                    const lines = batch.rejections
+                      .map((r) => `• ${rejectionSummary(r)}`)
+                      .join('\n');
+                    outboundText =
+                      (outboundText ? outboundText + '\n\n' : '') +
+                      `⚠️ 첨부 전송 실패:\n${lines}`;
+                  }
+                }
+              }
+              const metadata: MessageMetadata | undefined =
+                data.metadata && typeof data.metadata === 'object'
+                  ? (data.metadata as MessageMetadata)
+                  : undefined;
+              await deps.sendMessage(
+                data.chatJid,
+                outboundText,
+                hostFiles,
+                metadata,
+              );
+              logger.info(
+                {
+                  chatJid: data.chatJid,
+                  sourceGroup,
+                  fileCount: hostFiles?.length ?? 0,
+                },
+                'IPC message sent',
+              );
+            } else {
+              logger.warn(
+                { chatJid: data.chatJid, sourceGroup },
+                'Unauthorized IPC message attempt blocked',
+              );
+            }
+          }
+          fs.unlinkSync(filePath);
+        } catch (err) {
+          logger.error(
+            { file, sourceGroup, err },
+            'Error processing IPC message',
+          );
+          const errorDir = path.join(ipcBaseDir, 'errors');
+          fs.mkdirSync(errorDir, { recursive: true });
+          fs.renameSync(
+            filePath,
+            path.join(errorDir, `${sourceGroup}-${file}`),
+          );
+        }
+      }
+    }
+  } catch (err) {
+    logger.error({ err, sourceGroup }, 'Error reading IPC messages directory');
+  }
+
+  try {
+    if (fs.existsSync(tasksDir)) {
+      const taskFiles = fs
+        .readdirSync(tasksDir)
+        .filter((f) => f.endsWith('.json'));
+      for (const file of taskFiles) {
+        const filePath = path.join(tasksDir, file);
+        try {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          await processTaskIpc(data, sourceGroup, isMain, deps);
+          fs.unlinkSync(filePath);
+        } catch (err) {
+          logger.error({ file, sourceGroup, err }, 'Error processing IPC task');
+          const errorDir = path.join(ipcBaseDir, 'errors');
+          fs.mkdirSync(errorDir, { recursive: true });
+          fs.renameSync(
+            filePath,
+            path.join(errorDir, `${sourceGroup}-${file}`),
+          );
+        }
+      }
+    }
+  } catch (err) {
+    logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+  }
 }
 
 export async function processTaskIpc(
@@ -245,6 +255,9 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For spawn_subagent — no extra fields beyond prompt + targetJid, but
+    // allow an optional description for logging/future UI hooks.
+    description?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -344,6 +357,62 @@ export async function processTaskIpc(
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
+        );
+        deps.onTasksChanged();
+      }
+      break;
+
+    case 'spawn_subagent':
+      // Fire-and-forget parallel subagent. Reuses the scheduled_tasks row
+      // as the durable audit record; the scheduler will pick it up on the
+      // next poll and run it via the parallel path.
+      if (data.prompt && data.targetJid) {
+        const targetJid = data.targetJid as string;
+        const targetGroupEntry = registeredGroups[targetJid];
+
+        if (!targetGroupEntry) {
+          logger.warn(
+            { targetJid },
+            'Cannot spawn subagent: target group not registered',
+          );
+          break;
+        }
+
+        const targetFolder = targetGroupEntry.folder;
+
+        // Same auth story as schedule_task — non-main groups can only
+        // spawn for themselves.
+        if (!isMain && targetFolder !== sourceGroup) {
+          logger.warn(
+            { sourceGroup, targetFolder },
+            'Unauthorized spawn_subagent attempt blocked',
+          );
+          break;
+        }
+
+        const taskId =
+          data.taskId ||
+          `bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        // Run ~5s from now so the scheduler catches it on the next tick.
+        const nextRun = new Date(Date.now() + 5000).toISOString();
+
+        createTask({
+          id: taskId,
+          group_folder: targetFolder,
+          chat_jid: targetJid,
+          prompt: data.prompt,
+          script: null,
+          schedule_type: 'once',
+          schedule_value: nextRun,
+          context_mode: 'isolated',
+          execution_mode: 'parallel',
+          next_run: nextRun,
+          status: 'active',
+          created_at: new Date().toISOString(),
+        });
+        logger.info(
+          { taskId, sourceGroup, targetFolder },
+          'Parallel subagent queued via IPC',
         );
         deps.onTasksChanged();
       }

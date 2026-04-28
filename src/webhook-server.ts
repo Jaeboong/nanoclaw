@@ -56,10 +56,7 @@ async function handle(
   if (!constantTimeEquals(provided, opts.token)) {
     res.writeHead(401);
     res.end('unauthorized');
-    logger.warn(
-      { remote: req.socket.remoteAddress },
-      'Webhook auth rejected',
-    );
+    logger.warn({ remote: req.socket.remoteAddress }, 'Webhook auth rejected');
     return;
   }
 

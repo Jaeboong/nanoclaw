@@ -256,6 +256,69 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 );
 
 server.tool(
+  'spawn_subagent',
+  `Spawn a fire-and-forget parallel subagent in a fresh isolated container. Use this when you expect a task to take a long time (> ~2 min) — deploy scripts, long builds, data migrations, multi-step research — and you want to stay responsive in this chat while it runs.
+
+Key differences from schedule_task and the in-process Task tool:
+• vs schedule_task: immediate, no cron/interval/timestamp fields — just the prompt. The subagent starts within seconds.
+• vs Task: does NOT block your current turn. You should briefly acknowledge to the user ("시작했어, 끝나면 알려줄게") and finish your reply; the subagent runs in parallel and posts its result to this same chat when it finishes.
+
+Parallel isolation:
+• The subagent runs in a fresh session with no chat history — include ALL necessary context in the prompt.
+• The main conversation container keeps running, so the user can keep chatting with you. Their follow-up messages reach you, not the subagent.
+• Multiple subagents can run concurrently, bounded only by the host's global container limit.
+
+When the subagent finishes, its final output is delivered as a message in this chat — as if it came from another bot turn. Plan the prompt so the wording of that final message is what the user should see.
+
+Returns a task id you can reference in log output or future tools.`,
+  {
+    prompt: z
+      .string()
+      .describe(
+        "What the subagent should do. Must be self-contained — include context, files to read, criteria for done, and the exact wording or format you want in the final message it sends to the user.",
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe(
+        'Short label for logs and introspection (e.g. "deploy prod", "weekly report research"). Not shown to the user.',
+      ),
+    target_group_jid: z
+      .string()
+      .optional()
+      .describe(
+        '(Main group only) JID of the group to spawn the subagent for. Defaults to the current group.',
+      ),
+  },
+  async (args) => {
+    const targetJid =
+      isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+    const taskId = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const data = {
+      type: 'spawn_subagent',
+      taskId,
+      prompt: args.prompt,
+      description: args.description,
+      targetJid,
+      createdBy: groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Subagent ${taskId} spawning in parallel (${args.description ?? 'no description'}). It will post its result to this chat when done.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   'list_tasks',
   "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
   {},

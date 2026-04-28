@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
+import { BgTaskRegistry } from './bg-task-registry.js';
 import {
   _initTestDatabase,
   createTask,
@@ -64,6 +65,7 @@ beforeEach(() => {
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
+    bgRegistry: new BgTaskRegistry(),
   };
 });
 
@@ -143,6 +145,75 @@ describe('schedule_task authorization', () => {
 
     const allTasks = getAllTasks();
     expect(allTasks.length).toBe(0);
+  });
+});
+
+// --- spawn_subagent authorization ---
+
+describe('spawn_subagent authorization', () => {
+  it('non-main group spawns subagent for itself with parallel execution_mode', async () => {
+    await processTaskIpc(
+      {
+        type: 'spawn_subagent',
+        prompt: 'long-running research',
+        targetJid: 'other@g.us',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].execution_mode).toBe('parallel');
+    expect(tasks[0].schedule_type).toBe('once');
+    expect(tasks[0].context_mode).toBe('isolated');
+    expect(tasks[0].group_folder).toBe('other-group');
+  });
+
+  it('main group can spawn subagent for another group', async () => {
+    await processTaskIpc(
+      {
+        type: 'spawn_subagent',
+        prompt: 'x',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].group_folder).toBe('other-group');
+  });
+
+  it('non-main group cannot spawn subagent for a different group', async () => {
+    await processTaskIpc(
+      {
+        type: 'spawn_subagent',
+        prompt: 'evil',
+        targetJid: 'main@g.us',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getAllTasks()).toHaveLength(0);
+  });
+
+  it('rejects spawn_subagent for unregistered target JID', async () => {
+    await processTaskIpc(
+      {
+        type: 'spawn_subagent',
+        prompt: 'x',
+        targetJid: 'ghost@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getAllTasks()).toHaveLength(0);
   });
 });
 

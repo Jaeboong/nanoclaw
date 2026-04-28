@@ -17,7 +17,8 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { resolveGroupFolderPath } from './group-folder.js';
+import { groupNamespace, IpcNamespace } from './ipc-namespace.js';
 import { loadRuntimeSettings } from './group-runtime-settings.js';
 import { logger } from './logger.js';
 import {
@@ -49,6 +50,12 @@ export interface ContainerInput {
   model?: string;
   /** Runtime override from /effort slash command: 'low' | 'medium' | 'high' | 'max'. */
   effort?: string;
+  /**
+   * IPC namespace mounted at /workspace/ipc. Defaults to the group namespace.
+   * Parallel bg subagents pass a per-task bgNamespace so their input/messages
+   * directories don't collide with the group's primary container.
+   */
+  ipcNamespace?: IpcNamespace;
 }
 
 export interface ContainerOutput {
@@ -67,6 +74,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  ipcNamespace: IpcNamespace,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -190,15 +198,17 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Per-group IPC namespace: each group gets its own IPC directory
-  // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
-  fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  // IPC namespace: each container gets one host dir mounted at /workspace/ipc.
+  // Group containers and parallel bg subagents use different namespaces so
+  // their input/_close sentinels and drainIpcInput() scans never collide.
+  fs.mkdirSync(path.join(ipcNamespace.hostPath, 'messages'), {
+    recursive: true,
+  });
+  fs.mkdirSync(path.join(ipcNamespace.hostPath, 'tasks'), { recursive: true });
+  fs.mkdirSync(path.join(ipcNamespace.hostPath, 'input'), { recursive: true });
   mounts.push({
-    hostPath: groupIpcDir,
-    containerPath: '/workspace/ipc',
+    hostPath: ipcNamespace.hostPath,
+    containerPath: ipcNamespace.containerPath,
     readonly: false,
   });
 
@@ -351,9 +361,13 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const ipcNamespace = input.ipcNamespace ?? groupNamespace(group.folder);
+  const mounts = buildVolumeMounts(group, input.isMain, ipcNamespace);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const nameSuffix = ipcNamespace.taskId
+    ? `${safeName}-bg-${ipcNamespace.taskId}`
+    : safeName;
+  const containerName = `nanoclaw-${nameSuffix}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
   const agentIdentifier = input.isMain
     ? undefined
@@ -745,7 +759,7 @@ export async function runContainerAgent(
 }
 
 export function writeTasksSnapshot(
-  groupFolder: string,
+  namespace: IpcNamespace,
   isMain: boolean,
   tasks: Array<{
     id: string;
@@ -758,16 +772,16 @@ export function writeTasksSnapshot(
     next_run: string | null;
   }>,
 ): void {
-  // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
+  // Snapshot lives inside whichever IPC namespace the about-to-spawn container
+  // will mount. Authorization (filtering by folder) still uses the namespace's
+  // owning group, preserving the cross-group visibility rules.
+  fs.mkdirSync(namespace.hostPath, { recursive: true });
 
-  // Main sees all tasks, others only see their own
   const filteredTasks = isMain
     ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
+    : tasks.filter((t) => t.groupFolder === namespace.groupFolder);
 
-  const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
+  const tasksFile = path.join(namespace.hostPath, 'current_tasks.json');
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
@@ -784,18 +798,17 @@ export interface AvailableGroup {
  * Non-main groups only see their own registration status.
  */
 export function writeGroupsSnapshot(
-  groupFolder: string,
+  namespace: IpcNamespace,
   isMain: boolean,
   groups: AvailableGroup[],
   _registeredJids: Set<string>,
 ): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
+  fs.mkdirSync(namespace.hostPath, { recursive: true });
 
   // Main sees all groups; others see nothing (they can't activate groups)
   const visibleGroups = isMain ? groups : [];
 
-  const groupsFile = path.join(groupIpcDir, 'available_groups.json');
+  const groupsFile = path.join(namespace.hostPath, 'available_groups.json');
   fs.writeFileSync(
     groupsFile,
     JSON.stringify(

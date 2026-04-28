@@ -9,6 +9,7 @@ import {
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
+  TaskExecutionMode,
   TaskRunLog,
 } from './types.js';
 
@@ -96,6 +97,17 @@ function createSchema(database: Database.Database): void {
   // Add script column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
+  // Add execution_mode column if it doesn't exist (migration for existing DBs).
+  // 'blocking' (default) preserves pre-existing cron/interval/once semantics;
+  // 'parallel' marks fire-and-forget subagents that bypass group exclusivity.
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN execution_mode TEXT DEFAULT 'blocking'`,
+    );
   } catch {
     /* column already exists */
   }
@@ -405,12 +417,14 @@ export function getLastBotMessageTimestamp(
 }
 
 export function createTask(
-  task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
+  task: Omit<ScheduledTask, 'last_run' | 'last_result' | 'execution_mode'> & {
+    execution_mode?: TaskExecutionMode;
+  },
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, execution_mode, next_run, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -421,6 +435,7 @@ export function createTask(
     task.schedule_type,
     task.schedule_value,
     task.context_mode || 'isolated',
+    task.execution_mode || 'blocking',
     task.next_run,
     task.status,
     task.created_at,

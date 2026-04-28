@@ -1,7 +1,9 @@
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
+import path from 'path';
 
+import { BgTaskRegistry } from './bg-task-registry.js';
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
@@ -9,6 +11,7 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
+  deleteTask,
   getAllTasks,
   getDueTasks,
   getTaskById,
@@ -18,6 +21,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { bgNamespace, groupNamespace, IpcNamespace } from './ipc-namespace.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -73,6 +77,8 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  /** Registry the scheduler updates for the duration of each bg subagent run. */
+  bgRegistry: BgTaskRegistry;
 }
 
 async function runTask(
@@ -129,11 +135,26 @@ async function runTask(
     return;
   }
 
-  // Update tasks snapshot for container to read (filtered by group)
   const isMain = group.isMain === true;
+  const isParallel = task.execution_mode === 'parallel';
+  const namespace: IpcNamespace = isParallel
+    ? bgNamespace(task.group_folder, task.id)
+    : groupNamespace(task.group_folder);
+
+  if (isParallel) {
+    deps.bgRegistry.register({
+      taskId: task.id,
+      chatJid: task.chat_jid,
+      groupFolder: task.group_folder,
+      isMain,
+      namespace,
+    });
+  }
+
+  // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
   writeTasksSnapshot(
-    task.group_folder,
+    namespace,
     isMain,
     tasks.map((t) => ({
       id: t.id,
@@ -150,7 +171,9 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
+  // For group context mode, use the group's current session. Parallel
+  // subagents are always isolated in practice (no shared chat history) so
+  // sessionId stays undefined for them.
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
@@ -165,7 +188,20 @@ async function runTask(
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
-      deps.queue.closeStdin(task.chat_jid);
+      if (isParallel) {
+        // Bg subagents don't share the group's state.active slot, so
+        // GroupQueue.closeStdin can't find them. Write the sentinel
+        // directly into the bg namespace's input dir.
+        const inputDir = path.join(namespace.hostPath, 'input');
+        try {
+          fs.mkdirSync(inputDir, { recursive: true });
+          fs.writeFileSync(path.join(inputDir, '_close'), '');
+        } catch {
+          /* best-effort; container will time out otherwise */
+        }
+      } else {
+        deps.queue.closeStdin(task.chat_jid);
+      }
     }, TASK_CLOSE_DELAY_MS);
   };
 
@@ -181,9 +217,15 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        ipcNamespace: namespace,
       },
-      (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      (proc, containerName) => {
+        if (isParallel) {
+          deps.queue.registerParallelProcess(task.id, proc, containerName);
+        } else {
+          deps.onProcess(task.chat_jid, proc, containerName, task.group_folder);
+        }
+      },
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -192,7 +234,11 @@ async function runTask(
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
+          if (!isParallel) {
+            // notifyIdle acts on the group's single-slot state — bg jobs
+            // live in a parallel slot and never use that path.
+            deps.queue.notifyIdle(task.chat_jid);
+          }
           scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
@@ -211,13 +257,28 @@ async function runTask(
     }
 
     logger.info(
-      { taskId: task.id, durationMs: Date.now() - startTime },
+      { taskId: task.id, durationMs: Date.now() - startTime, isParallel },
       'Task completed',
     );
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+  } finally {
+    if (isParallel) {
+      // Give the IPC watcher ~2 polling intervals to drain any final
+      // send_message files the subagent wrote just before exit. After that,
+      // unregister the namespace from the watcher and remove the dir.
+      const BG_CLEANUP_DELAY_MS = 2500;
+      setTimeout(() => {
+        deps.bgRegistry.unregister(task.id);
+        try {
+          fs.rmSync(namespace.hostPath, { recursive: true, force: true });
+        } catch {
+          /* best-effort cleanup */
+        }
+      }, BG_CLEANUP_DELAY_MS);
+    }
   }
 
   const durationMs = Date.now() - startTime;
@@ -231,13 +292,26 @@ async function runTask(
     error,
   });
 
-  const nextRun = computeNextRun(task);
-  const resultSummary = error
-    ? `Error: ${error}`
-    : result
-      ? result.slice(0, 200)
-      : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  if (isParallel) {
+    // Bg subagents are fire-and-forget — no next_run to compute and the
+    // durable row has no further purpose once the run log is written.
+    try {
+      deleteTask(task.id);
+    } catch (err) {
+      logger.warn(
+        { taskId: task.id, err },
+        'Failed to delete completed parallel task row',
+      );
+    }
+  } else {
+    const nextRun = computeNextRun(task);
+    const resultSummary = error
+      ? `Error: ${error}`
+      : result
+        ? result.slice(0, 200)
+        : 'Completed';
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  }
 }
 
 let schedulerRunning = false;
@@ -264,9 +338,17 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
-        );
+        if (currentTask.execution_mode === 'parallel') {
+          deps.queue.enqueueParallelTask(
+            currentTask.chat_jid,
+            currentTask.id,
+            () => runTask(currentTask, deps),
+          );
+        } else {
+          deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+            runTask(currentTask, deps),
+          );
+        }
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

@@ -57,6 +57,8 @@ export interface NewMessage {
   reply_to_sender_name?: string;
 }
 
+export type TaskExecutionMode = 'blocking' | 'parallel';
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;
@@ -66,6 +68,7 @@ export interface ScheduledTask {
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
   context_mode: 'group' | 'isolated';
+  execution_mode: TaskExecutionMode;
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;

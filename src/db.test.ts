@@ -557,6 +557,39 @@ describe('task CRUD', () => {
     deleteTask('task-3');
     expect(getTaskById('task-3')).toBeUndefined();
   });
+
+  it('defaults execution_mode to blocking when omitted', () => {
+    createTask({
+      id: 'task-default-exec',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'p',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+    expect(getTaskById('task-default-exec')!.execution_mode).toBe('blocking');
+  });
+
+  it('persists execution_mode=parallel when provided', () => {
+    createTask({
+      id: 'task-parallel',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'p',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      execution_mode: 'parallel',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+    expect(getTaskById('task-parallel')!.execution_mode).toBe('parallel');
+  });
 });
 
 // --- LIMIT behavior ---

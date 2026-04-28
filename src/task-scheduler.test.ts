@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { BgTaskRegistry } from './bg-task-registry.js';
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
@@ -42,6 +43,7 @@ describe('task scheduler', () => {
       registeredGroups: () => ({}),
       getSessions: () => ({}),
       queue: { enqueueTask } as any,
+      bgRegistry: new BgTaskRegistry(),
       onProcess: () => {},
       sendMessage: async () => {},
     });
@@ -62,6 +64,7 @@ describe('task scheduler', () => {
       schedule_type: 'interval' as const,
       schedule_value: '60000', // 1 minute
       context_mode: 'isolated' as const,
+      execution_mode: 'blocking' as const,
       next_run: scheduledTime,
       last_run: null,
       last_result: null,
@@ -86,6 +89,7 @@ describe('task scheduler', () => {
       schedule_type: 'once' as const,
       schedule_value: '2026-01-01T00:00:00.000Z',
       context_mode: 'isolated' as const,
+      execution_mode: 'blocking' as const,
       next_run: new Date(Date.now() - 1000).toISOString(),
       last_run: null,
       last_result: null,
@@ -110,6 +114,7 @@ describe('task scheduler', () => {
       schedule_type: 'interval' as const,
       schedule_value: String(ms),
       context_mode: 'isolated' as const,
+      execution_mode: 'blocking' as const,
       next_run: scheduledTime,
       last_run: null,
       last_result: null,

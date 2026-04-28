@@ -481,4 +481,152 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  // --- Parallel tasks (spawn_subagent) ---
+
+  it('runs a parallel task without blocking the group main container', async () => {
+    let mainRunning = false;
+    let parallelRunning = false;
+    let releaseMain: () => void;
+    let releaseParallel: () => void;
+
+    const processMessages = vi.fn(async () => {
+      mainRunning = true;
+      await new Promise<void>((resolve) => {
+        releaseMain = resolve;
+      });
+      mainRunning = false;
+      return true;
+    });
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mainRunning).toBe(true);
+
+    const parallelFn = vi.fn(async () => {
+      parallelRunning = true;
+      await new Promise<void>((resolve) => {
+        releaseParallel = resolve;
+      });
+      parallelRunning = false;
+    });
+
+    queue.enqueueParallelTask('group1@g.us', 'bg-task-1', parallelFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Both should be running — group main AND parallel bg task concurrently
+    expect(mainRunning).toBe(true);
+    expect(parallelRunning).toBe(true);
+    expect(queue.hasParallelJob('bg-task-1')).toBe(true);
+
+    releaseMain!();
+    releaseParallel!();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(queue.hasParallelJob('bg-task-1')).toBe(false);
+  });
+
+  it('respects MAX_CONCURRENT_CONTAINERS for parallel tasks', async () => {
+    // MAX_CONCURRENT_CONTAINERS is mocked to 2.
+    let started = 0;
+    const resolvers: Array<() => void> = [];
+
+    const makeFn = () =>
+      vi.fn(async () => {
+        started++;
+        await new Promise<void>((resolve) => {
+          resolvers.push(resolve);
+        });
+      });
+
+    queue.enqueueParallelTask('group1@g.us', 'bg-a', makeFn());
+    queue.enqueueParallelTask('group2@g.us', 'bg-b', makeFn());
+    // Third one blows past the limit — should be queued
+    queue.enqueueParallelTask('group3@g.us', 'bg-c', makeFn());
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(started).toBe(2);
+
+    // Free one slot — third should drain
+    resolvers.shift()!();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(started).toBe(3);
+
+    // Clean up
+    for (const r of resolvers) r();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('is idempotent when enqueueing the same parallel taskId twice', async () => {
+    let started = 0;
+    let release: () => void;
+    const fn = vi.fn(async () => {
+      started++;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+
+    queue.enqueueParallelTask('group1@g.us', 'bg-dup', fn);
+    queue.enqueueParallelTask('group1@g.us', 'bg-dup', fn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(started).toBe(1);
+    release!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('registerParallelProcess tracks the container for a running parallel job', async () => {
+    let release: () => void;
+    const fn = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+
+    queue.enqueueParallelTask('group1@g.us', 'bg-reg', fn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(() =>
+      queue.registerParallelProcess('bg-reg', {} as any, 'nanoclaw-bg-reg-123'),
+    ).not.toThrow();
+
+    release!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('does not block parallel tasks when group is at group-exclusive state', async () => {
+    // Group has an active main container
+    let releaseMain: () => void;
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseMain = resolve;
+      });
+      return true;
+    });
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // User sends another message — should queue (per-group exclusivity)
+    queue.enqueueMessageCheck('group1@g.us');
+
+    // Meanwhile a parallel task kicks off
+    let parallelStarted = false;
+    let releaseParallel: () => void;
+    queue.enqueueParallelTask('group1@g.us', 'bg-x', async () => {
+      parallelStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseParallel = resolve;
+      });
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(parallelStarted).toBe(true);
+
+    releaseMain!();
+    releaseParallel!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
 });
