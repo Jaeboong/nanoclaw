@@ -17,6 +17,7 @@ import {
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { getMessage } from '../tone/index.js';
 import * as notesStore from '../notes-store.js';
 import * as opinionsStore from '../opinions-store.js';
 import {
@@ -312,7 +313,7 @@ export class DiscordChannel implements Channel {
             const ok = await refreshAllPanels(this.client!);
             await interaction.editReply(
               ok
-                ? '작업 렛저 (Jira / Non-Jira / 권장) 동기화 완료다냥'
+                ? getMessage('workSync.ok')
                 : '동기화 실패 — #추후-수정 채널 못 찾음',
             );
           } catch (err) {

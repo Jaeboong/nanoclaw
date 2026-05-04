@@ -5,6 +5,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 
+import { getMessage } from '../tone/index.js';
 import { JiraIssueCache, NonJiraTodo, JiraSuggestion } from './state.js';
 
 const STATUS_ORDER = ['To Do', 'In Progress', 'Code Review'];
@@ -185,7 +186,7 @@ export function buildSubtasksEphemeral(jiraIssues: JiraIssueCache[]): {
             new EmbedBuilder()
               .setColor(0x0052cc)
               .setTitle('서브태스크 없음')
-              .setDescription('현재 열린 서브태스크가 없다냥.'),
+              .setDescription(getMessage('jira.subtask.empty')),
           ],
         },
       ],

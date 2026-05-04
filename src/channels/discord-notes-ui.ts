@@ -24,8 +24,7 @@ import {
 import { logger } from '../logger.js';
 import * as notes from '../notes-store.js';
 import * as opinions from '../opinions-store.js';
-
-const DDONYANG_EMOJI = '<:ddonyang1:1498556584257917024>';
+import { getEmoji, getMessage } from '../tone/index.js';
 
 export interface NotesPanel {
   embeds: EmbedBuilder[];
@@ -48,8 +47,8 @@ export function buildPanel(): NotesPanel {
   if (items.length === 0) {
     embed.setDescription(
       filter === 'all'
-        ? `아직 등록된 항목이 없다냥 ${DDONYANG_EMOJI}\n아래 **➕ 추가** 버튼으로 등록해라냥.`
-        : `\`${filterLabel}\` 카테고리에 항목이 없다냥. 다른 카테고리를 골라봐라냥.`,
+        ? getMessage('notes.empty.all', { emoji: getEmoji() })
+        : getMessage('notes.empty.filtered', { filter: filterLabel }),
     );
   } else {
     embed.setDescription(
@@ -362,7 +361,7 @@ async function sendOpinionAddPickMenu(i: ButtonInteraction): Promise<void> {
     );
   const note =
     followups.length > 24
-      ? `(${followups.length}건 중 상위 24건만 보인다냥)`
+      ? getMessage('notes.list.truncated24', { n: followups.length })
       : '';
   await i.reply({
     content: `의견 달 항목 골라라냥 ${note}`.trim(),
@@ -383,7 +382,7 @@ async function handleOpinionAddPick(
     const fid = parseInt(value.slice(2), 10);
     const fol = notes.list().find((f) => f.id === fid);
     if (!fol) {
-      await i.update({ content: '항목 못 찾았다냥', components: [] });
+      await i.update({ content: getMessage('notes.notFound'), components: [] });
       return;
     }
     const idStr = `#${String(fid).padStart(3, '0')}`;
@@ -391,7 +390,10 @@ async function handleOpinionAddPick(
     await i.showModal(buildOpinionAddModal(fid, label));
     return;
   }
-  await i.update({ content: '알 수 없는 선택이다냥', components: [] });
+  await i.update({
+    content: getMessage('notes.unknownChoice'),
+    components: [],
+  });
 }
 
 function chunkLines(lines: string[], maxLen: number): string[] {
@@ -444,7 +446,10 @@ async function handleButton(
     const id = parseInt(idRaw, 10);
     const item = notes.list().find((it) => it.id === id);
     if (!item) {
-      await i.reply({ content: `#${id} 못 찾았다냥`, flags: 64 });
+      await i.reply({
+        content: getMessage('notes.idNotFound', { id }),
+        flags: 64,
+      });
       return { handled: true, mutated: false };
     }
     await i.showModal(buildEditModal(item, cat, pri as notes.Priority));
@@ -464,7 +469,7 @@ async function handleButton(
       const archive = notes.getArchive();
       const lines =
         archive.length === 0
-          ? ['_보관함이 비어있다냥._']
+          ? [getMessage('notes.archive.empty')]
           : archive
               .slice(0, 25)
               .map(
@@ -511,7 +516,7 @@ async function handleButton(
       return { handled: true, mutated: false };
     default:
       logger.warn({ action }, 'Unknown notes button action');
-      await i.reply({ content: '알 수 없는 버튼이다냥', flags: 64 });
+      await i.reply({ content: getMessage('notes.unknownButton'), flags: 64 });
       return { handled: true, mutated: false };
   }
 }
@@ -575,13 +580,19 @@ async function handleSelect(
       | 'delete';
     const id = parseInt(i.values[0], 10);
     if (!Number.isFinite(id)) {
-      await i.update({ content: 'ID 파싱 실패다냥', components: [] });
+      await i.update({
+        content: getMessage('notes.idParseFail'),
+        components: [],
+      });
       return { handled: true, mutated: false };
     }
     if (action === 'edit') {
       const item = notes.list().find((it) => it.id === id);
       if (!item) {
-        await i.update({ content: `#${id} 못 찾았다냥`, components: [] });
+        await i.update({
+          content: getMessage('notes.idNotFound', { id }),
+          components: [],
+        });
         return { handled: true, mutated: false };
       }
       await i.update({
@@ -593,11 +604,17 @@ async function handleSelect(
     if (action === 'complete') {
       const item = notes.complete(id);
       if (!item) {
-        await i.update({ content: `#${id} 못 찾았다냥`, components: [] });
+        await i.update({
+          content: getMessage('notes.idNotFound', { id }),
+          components: [],
+        });
         return { handled: true, mutated: false };
       }
       await i.update({
-        content: `${DDONYANG_EMOJI} **#${String(item.id).padStart(3, '0')}** 완료 처리, 보관함으로 옮겼다냥`,
+        content: getMessage('notes.complete.ok', {
+          emoji: getEmoji(),
+          padded: String(item.id).padStart(3, '0'),
+        }),
         components: [],
       });
       return { handled: true, mutated: true, ack: 'complete' };
@@ -605,11 +622,17 @@ async function handleSelect(
     if (action === 'delete') {
       const item = notes.remove(id);
       if (!item) {
-        await i.update({ content: `#${id} 못 찾았다냥`, components: [] });
+        await i.update({
+          content: getMessage('notes.idNotFound', { id }),
+          components: [],
+        });
         return { handled: true, mutated: false };
       }
       await i.update({
-        content: `${DDONYANG_EMOJI} **#${String(item.id).padStart(3, '0')}** 삭제했다냥`,
+        content: getMessage('notes.delete.ok', {
+          emoji: getEmoji(),
+          padded: String(item.id).padStart(3, '0'),
+        }),
         components: [],
       });
       return { handled: true, mutated: true, ack: 'delete' };
@@ -624,7 +647,7 @@ async function sendPickMenu(
 ): Promise<void> {
   const items = notes.list();
   if (items.length === 0) {
-    await i.reply({ content: '등록된 항목이 없다냥', flags: 64 });
+    await i.reply({ content: getMessage('notes.list.empty'), flags: 64 });
     return;
   }
   const verb =
@@ -654,7 +677,9 @@ async function sendPickMenu(
       select,
     );
   const note =
-    items.length > 25 ? `(총 ${items.length}건 중 상위 25건만 보인다냥)` : '';
+    items.length > 25
+      ? getMessage('notes.list.truncated25', { n: items.length })
+      : '';
   await i.reply({
     content: `${verb} 항목을 골라라냥 ${note}`.trim(),
     components: [row],
@@ -680,7 +705,10 @@ async function handleModal(
         const [cat, pri] = param.split(':');
         const title = i.fields.getTextInputValue('title');
         if (!title.trim()) {
-          await i.reply({ content: '내용은 필수다냥', flags: 64 });
+          await i.reply({
+            content: getMessage('notes.add.contentRequired'),
+            flags: 64,
+          });
           return { handled: true, mutated: false };
         }
         const item = notes.add({
@@ -690,7 +718,10 @@ async function handleModal(
           registeredBy: senderName,
         });
         await i.reply({
-          content: `${DDONYANG_EMOJI} **#${String(item.id).padStart(3, '0')}** 추가했다냥`,
+          content: getMessage('notes.add.ok', {
+            emoji: getEmoji(),
+            padded: String(item.id).padStart(3, '0'),
+          }),
           flags: 64,
         });
         return { handled: true, mutated: true, ack: 'add' };
@@ -699,7 +730,10 @@ async function handleModal(
         const [idRaw, cat, pri] = param.split(':');
         const id = parseInt(idRaw, 10);
         if (!Number.isFinite(id)) {
-          await i.reply({ content: 'ID 파싱 실패다냥', flags: 64 });
+          await i.reply({
+            content: getMessage('notes.idParseFail'),
+            flags: 64,
+          });
           return { handled: true, mutated: false };
         }
         const titleVal = i.fields.getTextInputValue('title').trim();
@@ -710,11 +744,17 @@ async function handleModal(
           priority: (pri as notes.Priority) || undefined,
         });
         if (!updated) {
-          await i.reply({ content: `#${id} 못 찾았다냥`, flags: 64 });
+          await i.reply({
+            content: getMessage('notes.idNotFound', { id }),
+            flags: 64,
+          });
           return { handled: true, mutated: false };
         }
         await i.reply({
-          content: `${DDONYANG_EMOJI} **#${String(updated.id).padStart(3, '0')}** 수정했다냥`,
+          content: getMessage('notes.edit.ok', {
+            emoji: getEmoji(),
+            padded: String(updated.id).padStart(3, '0'),
+          }),
           flags: 64,
         });
         return { handled: true, mutated: true, ack: 'edit' };
@@ -722,19 +762,27 @@ async function handleModal(
       case 'opinion-add': {
         const content = i.fields.getTextInputValue('content').trim();
         if (!content) {
-          await i.reply({ content: '의견 내용은 필수다냥', flags: 64 });
+          await i.reply({
+            content: getMessage('notes.opinion.contentRequired'),
+            flags: 64,
+          });
           return { handled: true, mutated: false };
         }
         let linkedFollowupId: number | undefined;
         if (param && param !== 'free') {
           const fid = parseInt(param, 10);
           if (!Number.isFinite(fid)) {
-            await i.reply({ content: '연결 ID 파싱 실패다냥', flags: 64 });
+            await i.reply({
+              content: getMessage('notes.opinion.linkParseFail'),
+              flags: 64,
+            });
             return { handled: true, mutated: false };
           }
           if (!notes.list().some((it) => it.id === fid)) {
             await i.reply({
-              content: `#${String(fid).padStart(3, '0')} 항목 못 찾았다냥`,
+              content: getMessage('notes.opinion.linkNotFound', {
+                padded: String(fid).padStart(3, '0'),
+              }),
               flags: 64,
             });
             return { handled: true, mutated: false };
@@ -752,7 +800,12 @@ async function handleModal(
             ? ` (#${String(linkedFollowupId).padStart(3, '0')} 연결)`
             : ' (자유 의견)';
         await i.reply({
-          content: `${DDONYANG_EMOJI} **${senderName}**의 의견 #${String(item.id).padStart(3, '0')}${linkedSuffix} 기억했다냥`,
+          content: getMessage('notes.opinion.ok', {
+            emoji: getEmoji(),
+            name: senderName,
+            padded: String(item.id).padStart(3, '0'),
+            linked: linkedSuffix,
+          }),
           flags: 64,
         });
         return { handled: true, mutated: true, ack: 'opinion-add' };
@@ -760,13 +813,16 @@ async function handleModal(
       case 'search': {
         const keyword = i.fields.getTextInputValue('keyword').trim();
         if (!keyword) {
-          await i.reply({ content: '검색어를 입력해라냥', flags: 64 });
+          await i.reply({
+            content: getMessage('notes.search.queryRequired'),
+            flags: 64,
+          });
           return { handled: true, mutated: false };
         }
         const found = notes.search(keyword);
         const lines =
           found.length === 0
-            ? [`\`${keyword}\` 매칭 항목 없다냥.`]
+            ? [getMessage('notes.search.empty', { kw: keyword })]
             : found
                 .slice(0, 25)
                 .map(
@@ -781,13 +837,13 @@ async function handleModal(
         return { handled: true, mutated: false };
       }
       default:
-        await i.reply({ content: '알 수 없는 모달이다냥', flags: 64 });
+        await i.reply({ content: getMessage('notes.unknownModal'), flags: 64 });
         return { handled: true, mutated: false };
     }
   } catch (err) {
     logger.error({ err, action }, 'Notes modal handling failed');
     if (!i.replied) {
-      await i.reply({ content: '처리 중 에러 났다냥', flags: 64 });
+      await i.reply({ content: getMessage('notes.error.generic'), flags: 64 });
     }
     return { handled: true, mutated: false };
   }

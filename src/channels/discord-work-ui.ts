@@ -17,6 +17,7 @@ import {
 
 import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
+import { getMessage } from '../tone/index.js';
 import { classifySide, parseSide } from '../work-ledger/classify.js';
 import {
   createJiraIssue,
@@ -245,7 +246,7 @@ export async function handleWorkInteraction(
       await b.deferReply({ flags: MessageFlags.Ephemeral });
       const ok = await refreshAllPanels(b.client);
       await b.editReply(
-        ok ? '동기화 완료다냥' : '동기화 실패다냥 — 로그 좀 봐줘',
+        ok ? getMessage('jira.sync.ok') : getMessage('jira.sync.fail'),
       );
       return { handled: true };
     }
@@ -265,10 +266,10 @@ export async function handleWorkInteraction(
         logger.error({ err }, 'expand-subtasks failed');
         try {
           if (b.deferred) {
-            await b.editReply('서브태스크 띄우다 막혔다냥 — 로그 봐줘');
+            await b.editReply(getMessage('jira.subtask.error'));
           } else {
             await b.reply({
-              content: '서브태스크 띄우다 막혔다냥 — 로그 봐줘',
+              content: getMessage('jira.subtask.error'),
               flags: MessageFlags.Ephemeral,
             });
           }
@@ -308,7 +309,7 @@ export async function handleWorkInteraction(
       const state = loadState();
       if (state.nonJiraTodos.length === 0) {
         await b.reply({
-          content: '수정할 항목이 없다냥.',
+          content: getMessage('nonjira.edit.empty'),
           flags: MessageFlags.Ephemeral,
         });
         return { handled: true };
@@ -324,7 +325,7 @@ export async function handleWorkInteraction(
           })),
         );
       await b.reply({
-        content: '수정할 항목 하나 골라줘냥.',
+        content: getMessage('nonjira.edit.pick'),
         components: [
           new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
         ],
@@ -337,7 +338,7 @@ export async function handleWorkInteraction(
       const total = state.nonJiraTodos.length;
       if (total === 0) {
         await b.reply({
-          content: '삭제할 항목이 없다냥.',
+          content: getMessage('nonjira.delete.empty'),
           flags: MessageFlags.Ephemeral,
         });
         return { handled: true };
@@ -355,7 +356,7 @@ export async function handleWorkInteraction(
           })),
         );
       await b.reply({
-        content: `삭제할 항목 골라줘냥 — 여러 개 선택 가능, 전체 다 지우려면 ${total}개 다 체크하면 된다냥. (선택 즉시 삭제)`,
+        content: getMessage('nonjira.delete.pick', { total }),
         components: [
           new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
         ],
@@ -368,7 +369,7 @@ export async function handleWorkInteraction(
       const total = state.nonJiraTodos.length;
       if (total === 0) {
         await b.reply({
-          content: 'Jira 로 옮길 항목이 없다냥.',
+          content: getMessage('nonjira.promote.empty'),
           flags: MessageFlags.Ephemeral,
         });
         return { handled: true };
@@ -386,7 +387,7 @@ export async function handleWorkInteraction(
           })),
         );
       await b.reply({
-        content: `Jira 에 등재할 항목 골라줘냥 — 여러 개 선택 가능, 전부 옮기려면 ${total}개 다 체크. \`[FE]/[BE] 내용\` Task 로 생성되고 Non-Jira 에서 빠진다냥.`,
+        content: getMessage('nonjira.promote.pick', { total }),
         components: [
           new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
         ],
@@ -400,19 +401,15 @@ export async function handleWorkInteraction(
       const state = loadState();
       const sugg = state.suggestions.find((s) => s.id === suggId);
       if (!sugg) {
-        await b.editReply('추천이 사라졌다냥 (이미 처리됐거나 삭제됨).');
+        await b.editReply(getMessage('suggestion.gone'));
         return { handled: true };
       }
       if (sugg.action.kind !== 'transition') {
-        await b.editReply(
-          '이 추천은 transition 타입이 아니다냥. 수정으로 풀어라.',
-        );
+        await b.editReply(getMessage('suggestion.notTransition'));
         return { handled: true };
       }
       if (!sugg.candidateIssueKey) {
-        await b.editReply(
-          '매칭된 Jira 키가 없다냥. 수정 버튼으로 키 박은 다음 적용해줘.',
-        );
+        await b.editReply(getMessage('suggestion.missingKey'));
         return { handled: true };
       }
       const result = await transitionIssue(
@@ -420,7 +417,9 @@ export async function handleWorkInteraction(
         sugg.action.status,
       );
       if (!result.ok) {
-        await b.editReply(`적용 실패다냥 — \`${result.error}\``);
+        await b.editReply(
+          getMessage('suggestion.apply.fail', { error: result.error ?? '' }),
+        );
         return { handled: true };
       }
       // Remove suggestion + refresh both pins
@@ -432,7 +431,10 @@ export async function handleWorkInteraction(
         logger.warn({ err }, 'post-apply Jira refresh failed'),
       );
       await b.editReply(
-        `적용 완료다냥 — \`${sugg.candidateIssueKey}\` → **${result.appliedStatus ?? sugg.action.status}**`,
+        getMessage('suggestion.apply.ok', {
+          key: sugg.candidateIssueKey,
+          status: result.appliedStatus ?? sugg.action.status,
+        }),
       );
       return { handled: true };
     }
@@ -442,7 +444,7 @@ export async function handleWorkInteraction(
       const sugg = state.suggestions.find((s) => s.id === suggId);
       if (!sugg) {
         await b.reply({
-          content: '추천이 사라졌다냥.',
+          content: getMessage('suggestion.goneShort'),
           flags: MessageFlags.Ephemeral,
         });
         return { handled: true };
@@ -485,8 +487,8 @@ export async function handleWorkInteraction(
       await b.reply({
         content:
           before === state.suggestions.length
-            ? '이미 사라진 추천이다냥.'
-            : '추천 삭제했다냥.',
+            ? getMessage('suggestion.delete.alreadyGone')
+            : getMessage('suggestion.delete.ok'),
         flags: MessageFlags.Ephemeral,
       });
       return { handled: true };
@@ -512,7 +514,7 @@ export async function handleWorkSelect(
     const todo = state.nonJiraTodos.find((t) => t.id === ids[0]);
     if (!todo) {
       await s.update({
-        content: '항목이 사라졌다냥 (이미 삭제된 듯).',
+        content: getMessage('nonjira.item.gone'),
         components: [],
       });
       return { handled: true };
@@ -548,7 +550,7 @@ export async function handleWorkSelect(
     const targets = state.nonJiraTodos.filter((t) => ids.includes(t.id));
     if (targets.length === 0) {
       await s.update({
-        content: '항목이 사라졌다냥 (이미 삭제된 듯).',
+        content: getMessage('nonjira.item.gone'),
         components: [],
       });
       return { handled: true };
@@ -567,7 +569,7 @@ export async function handleWorkSelect(
           (targets.length > 3 ? ', …' : '') +
           ')';
     await s.update({
-      content: `삭제 완료다냥 — ${summary}`,
+      content: getMessage('nonjira.delete.summary', { summary }),
       components: [],
     });
     return { handled: true };
@@ -578,7 +580,7 @@ export async function handleWorkSelect(
     const targets = state.nonJiraTodos.filter((t) => ids.includes(t.id));
     if (targets.length === 0) {
       await s.editReply({
-        content: '항목이 사라졌다냥 (이미 처리된 듯).',
+        content: getMessage('nonjira.item.gone'),
         components: [],
       });
       return { handled: true };
@@ -611,7 +613,7 @@ export async function handleWorkSelect(
 
     const lines: string[] = [];
     if (created.length > 0) {
-      lines.push(`Jira 생성 ${created.length}건 완료다냥:`);
+      lines.push(getMessage('nonjira.promote.header', { n: created.length }));
       for (const c of created) {
         lines.push(`• [${c.key}](${c.url}) "${c.summary.slice(0, 80)}"`);
       }
@@ -626,7 +628,9 @@ export async function handleWorkSelect(
       }
     }
     await s.editReply({
-      content: lines.join('\n').slice(0, 1900) || 'Jira 호출 결과 비어있다냥.',
+      content:
+        lines.join('\n').slice(0, 1900) ||
+        getMessage('nonjira.promote.emptyResult'),
       components: [],
     });
     return { handled: true };
@@ -660,9 +664,11 @@ export async function handleWorkModal(
     saveState(state);
     await refreshNonJiraPanel(m.client);
     await m.reply({
-      content: `추가했다냥 — \`${side.toUpperCase()}\` "${text.slice(0, 80)}"${
-        sideRaw ? '' : ' (분류는 내가 추정함)'
-      }`,
+      content: getMessage('nonjira.add.ok', {
+        side: side.toUpperCase(),
+        text: text.slice(0, 80),
+        rest: sideRaw ? '' : ' ' + getMessage('nonjira.add.autoNote'),
+      }),
       flags: MessageFlags.Ephemeral,
     });
     return { handled: true };
@@ -673,7 +679,7 @@ export async function handleWorkModal(
     const todo = state.nonJiraTodos.find((t) => t.id === todoId);
     if (!todo) {
       await m.reply({
-        content: '항목이 사라졌다냥.',
+        content: getMessage('nonjira.edit.gone'),
         flags: MessageFlags.Ephemeral,
       });
       return { handled: true };
@@ -685,7 +691,10 @@ export async function handleWorkModal(
     saveState(state);
     await refreshNonJiraPanel(m.client);
     await m.reply({
-      content: `수정 완료다냥 — \`${todo.side.toUpperCase()}\` "${text.slice(0, 80)}"`,
+      content: getMessage('nonjira.edit.ok', {
+        side: todo.side.toUpperCase(),
+        text: text.slice(0, 80),
+      }),
       flags: MessageFlags.Ephemeral,
     });
     return { handled: true };
@@ -696,7 +705,7 @@ export async function handleWorkModal(
     const sugg = state.suggestions.find((s) => s.id === suggId);
     if (!sugg) {
       await m.reply({
-        content: '추천이 사라졌다냥.',
+        content: getMessage('suggestion.edit.gone'),
         flags: MessageFlags.Ephemeral,
       });
       return { handled: true };
@@ -710,7 +719,10 @@ export async function handleWorkModal(
     saveState(state);
     await refreshSuggestionsPanel(m.client);
     await m.reply({
-      content: `추천 수정 완료다냥 — \`${issueKey}\` → **${targetStatus}**. 적용 버튼 누르면 반영된다냥.`,
+      content: getMessage('suggestion.edit.ok', {
+        key: issueKey,
+        status: targetStatus,
+      }),
       flags: MessageFlags.Ephemeral,
     });
     return { handled: true };
