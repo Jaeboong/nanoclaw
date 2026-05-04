@@ -14,6 +14,8 @@ const envConfig = readEnvFile([
   'WEBHOOK_PORT',
   'WEBHOOK_TOKEN',
   'WEBHOOK_GRAFANA_JID',
+  'WEBHOOK_GITLAB_JID',
+  'WEBHOOK_GITLAB_SECRET',
 ]);
 
 export const ASSISTANT_NAME =
@@ -119,3 +121,9 @@ export const WEBHOOK_TOKEN =
   process.env.WEBHOOK_TOKEN || envConfig.WEBHOOK_TOKEN || '';
 export const WEBHOOK_GRAFANA_JID =
   process.env.WEBHOOK_GRAFANA_JID || envConfig.WEBHOOK_GRAFANA_JID || '';
+// GitLab webhook (Push/MR on lab.ssafy.com → synthetic chat message).
+// Disabled when WEBHOOK_GITLAB_JID or WEBHOOK_GITLAB_SECRET is empty.
+export const WEBHOOK_GITLAB_JID =
+  process.env.WEBHOOK_GITLAB_JID || envConfig.WEBHOOK_GITLAB_JID || '';
+export const WEBHOOK_GITLAB_SECRET =
+  process.env.WEBHOOK_GITLAB_SECRET || envConfig.WEBHOOK_GITLAB_SECRET || '';
