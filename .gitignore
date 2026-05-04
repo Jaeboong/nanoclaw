@@ -22,6 +22,9 @@ groups/global/*
 *.keys.json
 .env
 
+# Personal tone overrides (loaded at runtime via NANOCLAW_TONE; see src/tone/messages.ts)
+src/tone/ddonyang.ts
+
 # Temp files
 .tmp-*
 
