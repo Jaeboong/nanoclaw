@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import {
   AttachmentBuilder,
   Client,
@@ -6,14 +8,28 @@ import {
   GatewayIntentBits,
   MessageFlags,
   Message,
+  MessageType,
   SlashCommandBuilder,
   TextChannel,
   type Interaction,
 } from 'discord.js';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import * as notesStore from '../notes-store.js';
+import * as opinionsStore from '../opinions-store.js';
+import {
+  buildPanel as buildNotesPanel,
+  handleInteraction as handleNotesInteraction,
+} from './discord-notes-ui.js';
+import {
+  handleWorkInteraction,
+  handleWorkModal,
+  handleWorkSelect,
+  refreshAllPanels,
+  setDiscordClient as setWorkLedgerClient,
+} from './discord-work-ui.js';
 import {
   DEFAULT_SENTINEL,
   EFFORT_CHOICES,
@@ -74,6 +90,21 @@ export class DiscordChannel implements Channel {
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
+      // Auto-delete the system "X pinned a message" notification when WE pin.
+      // This is what creates the spam in #추후-수정 every /work-sync. Other
+      // human-driven pins still get cleaned up too — that's fine, the pin
+      // itself remains.
+      if (
+        message.type === MessageType.ChannelPinnedMessage &&
+        message.author.id === this.client?.user?.id
+      ) {
+        try {
+          await message.delete();
+        } catch {
+          /* ignore — already gone or no perms */
+        }
+        return;
+      }
       // Ignore bot messages (including own)
       if (message.author.bot) return;
 
@@ -202,6 +233,20 @@ export class DiscordChannel implements Channel {
         { chatJid, chatName, sender: senderName },
         'Discord message stored',
       );
+
+      // discord_notes channel: keep the channel clean — delete every
+      // non-bot message after it's stored. Bot's own messages (panel,
+      // responses) are left for refreshNotesPanel/auto-delete logic.
+      if (group.folder === 'discord_notes' && !message.author.bot) {
+        try {
+          await message.delete();
+        } catch (err) {
+          logger.warn(
+            { err, msgId },
+            'Failed to delete user message in notes channel',
+          );
+        }
+      }
     });
 
     // Handle errors gracefully
@@ -209,10 +254,48 @@ export class DiscordChannel implements Channel {
       logger.error({ err: err.message }, 'Discord client error');
     });
 
-    // Slash command handlers (/model, /effort, /compact, /daily, /weekly, /monthly)
+    // Slash command + notes UI handlers (buttons / select / modals)
     this.client.on(
       Events.InteractionCreate,
       async (interaction: Interaction) => {
+        // Notes channel UI: buttons / select menus / modals
+        if (
+          interaction.isButton() ||
+          interaction.isStringSelectMenu() ||
+          interaction.isModalSubmit()
+        ) {
+          const customId = (interaction as { customId?: string }).customId;
+          if (customId?.startsWith('notes:')) {
+            try {
+              const result = await handleNotesInteraction(interaction);
+              if (result.handled && result.mutated) {
+                const channelId = (interaction as { channelId?: string })
+                  .channelId;
+                if (channelId) {
+                  await this.refreshNotesPanel(`dc:${channelId}`);
+                }
+              }
+            } catch (err) {
+              logger.error({ err }, 'Notes interaction handling failed');
+            }
+            return;
+          }
+          if (customId?.startsWith('work:')) {
+            try {
+              if (interaction.isButton()) {
+                await handleWorkInteraction(interaction);
+              } else if (interaction.isStringSelectMenu()) {
+                await handleWorkSelect(interaction);
+              } else if (interaction.isModalSubmit()) {
+                await handleWorkModal(interaction);
+              }
+            } catch (err) {
+              logger.error({ err }, 'Work interaction handling failed');
+            }
+            return;
+          }
+        }
+
         if (!interaction.isChatInputCommand()) return;
         const cmd = interaction.commandName;
         if (cmd === 'model' || cmd === 'effort' || cmd === 'compact') {
@@ -221,6 +304,21 @@ export class DiscordChannel implements Channel {
         }
         if (cmd === 'daily' || cmd === 'weekly' || cmd === 'monthly') {
           await this.handleGrafanaSummaryCommand(interaction, cmd);
+          return;
+        }
+        if (cmd === 'work-sync') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          try {
+            const ok = await refreshAllPanels(this.client!);
+            await interaction.editReply(
+              ok
+                ? '작업 렛저 (Jira / Non-Jira / 권장) 동기화 완료다냥'
+                : '동기화 실패 — #추후-수정 채널 못 찾음',
+            );
+          } catch (err) {
+            logger.error({ err }, 'work-sync failed');
+            await interaction.editReply('동기화 중 에러 — 로그 확인');
+          }
           return;
         }
       },
@@ -232,6 +330,7 @@ export class DiscordChannel implements Channel {
           { username: readyClient.user.tag, id: readyClient.user.id },
           'Discord bot connected',
         );
+        setWorkLedgerClient(this.client!);
         console.log(`\n  Discord bot: ${readyClient.user.tag}`);
         console.log(
           `  Use /chatid command or check channel IDs in Discord settings\n`,
@@ -241,6 +340,8 @@ export class DiscordChannel implements Channel {
         } catch (err) {
           logger.error({ err }, 'Failed to register slash commands');
         }
+        // Legacy notes panel auto-refresh disabled — work-ledger UI now owns
+        // the discord_notes channel pin. Refresh via /work-sync or webhook.
         resolve();
       });
 
@@ -295,6 +396,10 @@ export class DiscordChannel implements Channel {
       new SlashCommandBuilder()
         .setName('monthly')
         .setDescription('월간 SLI 리뷰 즉시 실행 (#grafana 전용)')
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('work-sync')
+        .setDescription('작업 렛저 강제 동기화 (Jira 풀 + 핀 메시지 갱신)')
         .toJSON(),
     ];
 
@@ -564,6 +669,17 @@ export class DiscordChannel implements Channel {
 
       const textChannel = channel as TextChannel;
       await this.clearStatus(jid, textChannel);
+
+      // discord_notes channel: legacy notes-ui panel is replaced by the new
+      // work-ledger UI (refreshed via /work-sync, not auto on every message).
+      const groupForJid = this.opts.registeredGroups()[jid];
+      const isNotesChannel = groupForJid?.folder === 'discord_notes';
+      void isNotesChannel; // kept for potential future per-channel branching
+      let aiResponseSent = false;
+      const sendNotesPanelAfter = async () => {
+        // no-op: legacy notes panel disabled; work-ledger panel is managed
+        // explicitly by /work-sync and (later) webhook + cron.
+      };
       const inboundFiles =
         files && files.length > 0
           ? files.map((f) => new AttachmentBuilder(f))
@@ -580,11 +696,16 @@ export class DiscordChannel implements Channel {
       // first payload too (existing behavior).
       const firstBatchFiles = [...inboundFiles, ...tableAttachments];
 
+      const sentMessages: Message[] = [];
+
       // Empty text but attachments present — send files with no embed.
       if (embeds.length === 0) {
         if (firstBatchFiles.length > 0) {
-          await textChannel.send({ files: firstBatchFiles });
+          const m = await textChannel.send({ files: firstBatchFiles });
+          sentMessages.push(m);
         }
+        if (isNotesChannel) this.scheduleNotesMessageDelete(sentMessages);
+        await sendNotesPanelAfter();
         return;
       }
 
@@ -596,15 +717,21 @@ export class DiscordChannel implements Channel {
         if (i === 0 && firstBatchFiles.length > 0) {
           payload.files = firstBatchFiles;
         }
-        await textChannel.send(payload);
+        const m = await textChannel.send(payload);
+        sentMessages.push(m);
       }
 
       if (overflowText) {
         const MAX_LENGTH = 2000;
         for (let i = 0; i < overflowText.length; i += MAX_LENGTH) {
-          await textChannel.send(overflowText.slice(i, i + MAX_LENGTH));
+          const m = await textChannel.send(
+            overflowText.slice(i, i + MAX_LENGTH),
+          );
+          sentMessages.push(m);
         }
       }
+
+      if (isNotesChannel) this.scheduleNotesMessageDelete(sentMessages);
 
       logger.info(
         {
@@ -617,8 +744,98 @@ export class DiscordChannel implements Channel {
         },
         'Discord message sent',
       );
+      aiResponseSent = embeds.length > 0 || overflowText.length > 0;
+      // After the AI response posts, re-pin the notes panel at the bottom.
+      // Suppress unused warning; aiResponseSent is read here to keep the
+      // semantic clear that we send the panel even if the response was empty.
+      void aiResponseSent;
+      await sendNotesPanelAfter();
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+    }
+  }
+
+  /**
+   * For the discord_notes channel: delete any previous panel message and post
+   * a fresh one at the bottom. Stores the new message id in the group's
+   * .notes-panel.json so the next refresh can find and delete it again.
+   */
+  private scheduleNotesMessageDelete(messages: Message[]): void {
+    const TTL_MS = 60_000;
+    for (const m of messages) {
+      setTimeout(() => {
+        m.delete().catch((err) => {
+          logger.debug(
+            { err, id: m.id },
+            'Notes channel auto-delete failed (already gone?)',
+          );
+        });
+      }, TTL_MS);
+    }
+  }
+
+  private async refreshAllNotesPanels(): Promise<void> {
+    const groups = this.opts.registeredGroups();
+    const targets = Object.entries(groups).filter(
+      ([jid, g]) => g.folder === 'discord_notes' && jid.startsWith('dc:'),
+    );
+    for (const [jid] of targets) {
+      try {
+        await this.refreshNotesPanel(jid);
+        logger.info({ jid }, 'Refreshed notes panel on startup');
+      } catch (err) {
+        logger.warn({ jid, err }, 'Notes panel refresh failed on startup');
+      }
+    }
+  }
+
+  private async refreshNotesPanel(jid: string): Promise<void> {
+    if (!this.client) return;
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('send' in channel)) return;
+      const textChannel = channel as TextChannel;
+
+      const stateFile = path.join(
+        GROUPS_DIR,
+        'discord_notes',
+        '.notes-panel.json',
+      );
+      let prevId: string | undefined;
+      try {
+        const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        prevId = raw.lastPanelMessageId;
+      } catch {
+        // first run or corrupt — ignore
+      }
+
+      // Best-effort delete previous panel
+      if (prevId) {
+        try {
+          const prev = await textChannel.messages.fetch(prevId);
+          await prev.delete();
+        } catch {
+          // already deleted or not found
+        }
+      }
+
+      notesStore.bootstrap();
+      opinionsStore.bootstrap();
+      const panel = buildNotesPanel();
+      const sent = await textChannel.send({
+        embeds: panel.embeds,
+        components: panel.components,
+      });
+
+      fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+      fs.writeFileSync(
+        stateFile,
+        JSON.stringify({ lastPanelMessageId: sent.id }, null, 2),
+        'utf-8',
+      );
+    } catch (err) {
+      logger.error({ err, jid }, 'Failed to refresh notes panel');
     }
   }
 

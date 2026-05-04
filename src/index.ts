@@ -13,6 +13,8 @@ import {
   ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
+  WEBHOOK_GITLAB_JID,
+  WEBHOOK_GITLAB_SECRET,
   WEBHOOK_GRAFANA_JID,
   WEBHOOK_PORT,
   WEBHOOK_TOKEN,
@@ -75,6 +77,17 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { startWebhookServer } from './webhook-server.js';
+import {
+  getDiscordClient,
+  refreshSuggestionsPanel,
+} from './channels/discord-work-ui.js';
+import {
+  appendSuggestions,
+  buildSuggestionFromMR,
+  buildSuggestionsFromPush,
+  type GitlabMRPayloadLite,
+  type GitlabPushPayloadLite,
+} from './work-ledger/suggestions.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -845,6 +858,32 @@ async function main(): Promise<void> {
       token: WEBHOOK_TOKEN,
       grafanaJid: WEBHOOK_GRAFANA_JID,
       grafanaChatName: '두잇뚜 #grafana',
+      gitlabJid: WEBHOOK_GITLAB_JID || undefined,
+      gitlabChatName: '두잇뚜 #추후-수정',
+      gitlabSecret: WEBHOOK_GITLAB_SECRET || undefined,
+      onGitlabEvent: async (payload, eventHeader) => {
+        // Parse, dedupe-append to suggestions, refresh pin. Silent —
+        // bot is NOT triggered (no synthetic chat message stored).
+        let added: ReturnType<typeof appendSuggestions> = [];
+        if (eventHeader === 'Push Hook') {
+          const built = buildSuggestionsFromPush(
+            payload as GitlabPushPayloadLite,
+          );
+          added = appendSuggestions(built);
+        } else if (eventHeader === 'Merge Request Hook') {
+          const built = buildSuggestionFromMR(payload as GitlabMRPayloadLite);
+          added = built ? appendSuggestions([built]) : [];
+        }
+        const client = getDiscordClient();
+        if (client && added.length > 0) {
+          refreshSuggestionsPanel(client).catch((err) =>
+            logger.warn({ err }, 'sugg pin refresh failed after webhook'),
+          );
+        }
+        return {
+          summary: `event=${eventHeader} added=${added.length}`,
+        };
+      },
       triggerPrefix: DEFAULT_TRIGGER,
     });
   } else {
