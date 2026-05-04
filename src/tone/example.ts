@@ -56,32 +56,4 @@ export const MESSAGES: Partial<Record<MessageKey, string>> = {
   'suggestion.edit.gone': 'Suggestion is gone.',
   'suggestion.edit.ok':
     'Suggestion edited — `{key}` → **{status}**. Hit Apply to commit.',
-
-  'notes.empty.all':
-    'No items yet {emoji}\nUse the **➕ Add** button below to register.',
-  'notes.empty.filtered':
-    'No items in `{filter}`. Pick another category.',
-  'notes.list.truncated24': '(showing top 24 of {n})',
-  'notes.list.truncated25': '(showing top 25 of {n})',
-  'notes.list.empty': 'No items registered.',
-  'notes.notFound': 'Item not found.',
-  'notes.idNotFound': '#{id} not found',
-  'notes.unknownChoice': 'Unknown choice.',
-  'notes.unknownButton': 'Unknown button.',
-  'notes.unknownModal': 'Unknown modal.',
-  'notes.idParseFail': 'Failed to parse ID.',
-  'notes.archive.empty': '_Archive is empty._',
-  'notes.complete.ok': '{emoji} **#{padded}** marked complete, moved to archive.',
-  'notes.delete.ok': '{emoji} **#{padded}** deleted.',
-  'notes.add.ok': '{emoji} **#{padded}** added.',
-  'notes.add.contentRequired': 'Content is required.',
-  'notes.edit.ok': '{emoji} **#{padded}** edited.',
-  'notes.opinion.ok':
-    "{emoji} **{name}**'s opinion #{padded}{linked} recorded.",
-  'notes.opinion.contentRequired': 'Opinion content is required.',
-  'notes.opinion.linkParseFail': 'Failed to parse link ID.',
-  'notes.opinion.linkNotFound': '#{padded} not found.',
-  'notes.search.empty': 'No matches for `{kw}`.',
-  'notes.search.queryRequired': 'Enter a search term.',
-  'notes.error.generic': 'Error while processing.',
 };

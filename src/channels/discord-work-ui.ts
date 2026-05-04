@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import {
   ActionRowBuilder,
   ButtonInteraction,
@@ -15,7 +13,6 @@ import {
   TextInputStyle,
 } from 'discord.js';
 
-import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
 import { getMessage } from '../tone/index.js';
 import { classifySide, parseSide } from '../work-ledger/classify.js';
@@ -33,31 +30,20 @@ import {
 } from '../work-ledger/renderer.js';
 import { loadState, saveState } from '../work-ledger/state.js';
 
-// Work ledger lives in #추후-수정 (folder discord_notes), not #메인.
-const TARGET_CHANNEL_ID = '1498600648982265906';
-
-// Module-level Discord client reference, set after the bot is ready.
-// Used by the webhook server (which lives outside the channel module) to
-// trigger pin refreshes without coupling the two modules tightly.
-let _client: Client | null = null;
-export function setDiscordClient(c: Client): void {
-  _client = c;
-}
-export function getDiscordClient(): Client | null {
-  return _client;
-}
-
 export interface InteractionResult {
   handled: boolean;
   ack?: string;
 }
 
-async function getTargetChannel(client: Client): Promise<TextChannel | null> {
+async function getTargetChannel(
+  client: Client,
+  channelId: string,
+): Promise<TextChannel | null> {
   try {
-    const ch = await client.channels.fetch(TARGET_CHANNEL_ID);
+    const ch = await client.channels.fetch(channelId);
     if (ch && ch.isTextBased() && 'send' in ch) return ch as TextChannel;
   } catch (err) {
-    logger.warn({ err }, 'failed to fetch #추후-수정 channel');
+    logger.warn({ err, channelId }, 'failed to fetch jira panel channel');
   }
   return null;
 }
@@ -72,29 +58,6 @@ async function deletePrevious(
     await old.delete();
   } catch {
     // already gone — fine
-  }
-}
-
-/**
- * Best-effort: clean up the legacy notes-ui pinned message on first sync,
- * since we're taking over the channel.  Deletes the message and removes the
- * stale state file so it doesn't get re-created.
- */
-async function cleanupLegacyNotesPanel(channel: TextChannel): Promise<void> {
-  const statePath = path.join(GROUPS_DIR, 'discord_notes', '.notes-panel.json');
-  if (!fs.existsSync(statePath)) return;
-  try {
-    const raw = fs.readFileSync(statePath, 'utf-8');
-    const parsed = JSON.parse(raw) as { lastPanelMessageId?: string };
-    if (parsed.lastPanelMessageId) {
-      await deletePrevious(channel, parsed.lastPanelMessageId);
-    }
-    fs.unlinkSync(statePath);
-    logger.info(
-      'Legacy notes panel removed; work-ledger now owns this channel',
-    );
-  } catch (err) {
-    logger.warn({ err }, 'Legacy notes panel cleanup failed (non-fatal)');
   }
 }
 
@@ -114,7 +77,6 @@ async function upsertPanel(
     try {
       const existing = await channel.messages.fetch(prevId);
       await existing.edit({ embeds, components });
-      // If somehow it got unpinned (user action), re-pin silently.
       if (!existing.pinned) {
         try {
           await existing.pin();
@@ -128,7 +90,6 @@ async function upsertPanel(
         { err, prevId },
         'panel edit-in-place failed; falling back to send+pin',
       );
-      // fall through to send-new path
     }
   }
   const sent = await channel.send({ embeds, components });
@@ -140,11 +101,13 @@ async function upsertPanel(
   return sent.id;
 }
 
-/** Refresh all three pinned panels in #추후-수정 (Jira / Non-Jira / Suggestions). */
-export async function refreshAllPanels(client: Client): Promise<boolean> {
-  const channel = await getTargetChannel(client);
+/** Refresh all three pinned panels (Jira / Non-Jira / Suggestions). */
+export async function refreshAllPanels(
+  client: Client,
+  channelId: string,
+): Promise<boolean> {
+  const channel = await getTargetChannel(client, channelId);
   if (!channel) return false;
-  await cleanupLegacyNotesPanel(channel);
   const state = loadState();
   if (state.legacyCombinedPanelMessageId) {
     await deletePrevious(channel, state.legacyCombinedPanelMessageId);
@@ -157,7 +120,6 @@ export async function refreshAllPanels(client: Client): Promise<boolean> {
     state.lastJiraFetch = new Date().toISOString();
   }
 
-  // 1. Jira ledger
   const jira = buildJiraPanel({
     jiraIssues: state.jiraIssues,
     lastJiraFetch: state.lastJiraFetch,
@@ -170,7 +132,6 @@ export async function refreshAllPanels(client: Client): Promise<boolean> {
     state.jiraPanelMessageId,
   );
 
-  // 2. Non-Jira ledger
   const nonJira = buildNonJiraPanel({ todos: state.nonJiraTodos });
   state.nonJiraPanelMessageId = await upsertPanel(
     channel,
@@ -179,7 +140,6 @@ export async function refreshAllPanels(client: Client): Promise<boolean> {
     state.nonJiraPanelMessageId,
   );
 
-  // 3. Suggestions
   const sugg = buildSuggestionsPanel(state.suggestions);
   state.suggestionsPanelMessageId = await upsertPanel(
     channel,
@@ -195,8 +155,9 @@ export async function refreshAllPanels(client: Client): Promise<boolean> {
 /** Re-render only the suggestions pin (used after webhook adds new suggestions). */
 export async function refreshSuggestionsPanel(
   client: Client,
+  channelId: string,
 ): Promise<boolean> {
-  const channel = await getTargetChannel(client);
+  const channel = await getTargetChannel(client, channelId);
   if (!channel) return false;
   const state = loadState();
   const { embeds, components } = buildSuggestionsPanel(state.suggestions);
@@ -211,8 +172,11 @@ export async function refreshSuggestionsPanel(
 }
 
 /** Re-render only the Non-Jira pin (used after CRUD ops on todos). */
-export async function refreshNonJiraPanel(client: Client): Promise<boolean> {
-  const channel = await getTargetChannel(client);
+export async function refreshNonJiraPanel(
+  client: Client,
+  channelId: string,
+): Promise<boolean> {
+  const channel = await getTargetChannel(client, channelId);
   if (!channel) return false;
   const state = loadState();
   const { embeds, components } = buildNonJiraPanel({
@@ -230,10 +194,10 @@ export async function refreshNonJiraPanel(client: Client): Promise<boolean> {
 
 /**
  * Handle button clicks on the work panel.  All work:* customIds route here.
- * Phase 1 = stubs only.  Real CRUD + Jira promotion come in next phase.
  */
 export async function handleWorkInteraction(
   i: Interaction,
+  panelChannelId: string,
 ): Promise<InteractionResult> {
   if (!i.isButton()) return { handled: false };
   const b = i as ButtonInteraction;
@@ -244,7 +208,7 @@ export async function handleWorkInteraction(
   switch (action) {
     case 'sync': {
       await b.deferReply({ flags: MessageFlags.Ephemeral });
-      const ok = await refreshAllPanels(b.client);
+      const ok = await refreshAllPanels(b.client, panelChannelId);
       await b.editReply(
         ok ? getMessage('jira.sync.ok') : getMessage('jira.sync.fail'),
       );
@@ -280,7 +244,6 @@ export async function handleWorkInteraction(
       return { handled: true };
     }
     case 'add': {
-      // Empty modal — auto-classify on submit.
       const modal = new ModalBuilder()
         .setCustomId('work:modal:add')
         .setTitle('Non-Jira 할 일 추가')
@@ -422,12 +385,11 @@ export async function handleWorkInteraction(
         );
         return { handled: true };
       }
-      // Remove suggestion + refresh both pins
       const fresh = loadState();
       fresh.suggestions = fresh.suggestions.filter((s) => s.id !== suggId);
       saveState(fresh);
-      await refreshSuggestionsPanel(b.client);
-      refreshAllPanels(b.client).catch((err) =>
+      await refreshSuggestionsPanel(b.client, panelChannelId);
+      refreshAllPanels(b.client, panelChannelId).catch((err) =>
         logger.warn({ err }, 'post-apply Jira refresh failed'),
       );
       await b.editReply(
@@ -483,7 +445,7 @@ export async function handleWorkInteraction(
       const before = state.suggestions.length;
       state.suggestions = state.suggestions.filter((s) => s.id !== suggId);
       saveState(state);
-      await refreshSuggestionsPanel(b.client);
+      await refreshSuggestionsPanel(b.client, panelChannelId);
       await b.reply({
         content:
           before === state.suggestions.length
@@ -500,6 +462,7 @@ export async function handleWorkInteraction(
 
 export async function handleWorkSelect(
   i: Interaction,
+  panelChannelId: string,
 ): Promise<InteractionResult> {
   if (!i.isStringSelectMenu()) return { handled: false };
   const s = i as StringSelectMenuInteraction;
@@ -509,7 +472,6 @@ export async function handleWorkSelect(
   const ids = s.values;
   const state = loadState();
 
-  // Edit is single-select only (modal needs one item context)
   if (sub === 'edit') {
     const todo = state.nonJiraTodos.find((t) => t.id === ids[0]);
     if (!todo) {
@@ -557,7 +519,7 @@ export async function handleWorkSelect(
     }
     state.nonJiraTodos = state.nonJiraTodos.filter((t) => !ids.includes(t.id));
     saveState(state);
-    await refreshNonJiraPanel(s.client);
+    await refreshNonJiraPanel(s.client, panelChannelId);
     const summary =
       targets.length === 1
         ? `\`${targets[0].text.slice(0, 60)}\``
@@ -606,8 +568,8 @@ export async function handleWorkSelect(
       (t) => !okIds.includes(t.id),
     );
     saveState(state);
-    await refreshNonJiraPanel(s.client);
-    refreshAllPanels(s.client).catch((err) =>
+    await refreshNonJiraPanel(s.client, panelChannelId);
+    refreshAllPanels(s.client, panelChannelId).catch((err) =>
       logger.warn({ err }, 'post-promote refresh failed'),
     );
 
@@ -641,6 +603,7 @@ export async function handleWorkSelect(
 
 export async function handleWorkModal(
   i: Interaction,
+  panelChannelId: string,
 ): Promise<InteractionResult> {
   if (!i.isModalSubmit()) return { handled: false };
   const m = i as ModalSubmitInteraction;
@@ -662,7 +625,7 @@ export async function handleWorkModal(
     };
     state.nonJiraTodos.push(todo);
     saveState(state);
-    await refreshNonJiraPanel(m.client);
+    await refreshNonJiraPanel(m.client, panelChannelId);
     await m.reply({
       content: getMessage('nonjira.add.ok', {
         side: side.toUpperCase(),
@@ -689,7 +652,7 @@ export async function handleWorkModal(
     todo.text = text;
     todo.side = parseSide(sideRaw, todo.side);
     saveState(state);
-    await refreshNonJiraPanel(m.client);
+    await refreshNonJiraPanel(m.client, panelChannelId);
     await m.reply({
       content: getMessage('nonjira.edit.ok', {
         side: todo.side.toUpperCase(),
@@ -714,10 +677,10 @@ export async function handleWorkModal(
     const targetStatus = m.fields.getTextInputValue('targetStatus').trim();
     sugg.candidateIssueKey = issueKey || undefined;
     sugg.action = { kind: 'transition', status: targetStatus || 'In Progress' };
-    sugg.confidence = 1; // user confirmed
+    sugg.confidence = 1;
     sugg.reasoning = `${sugg.reasoning}\n  _(사용자 수정: ${issueKey} → ${targetStatus})_`;
     saveState(state);
-    await refreshSuggestionsPanel(m.client);
+    await refreshSuggestionsPanel(m.client, panelChannelId);
     await m.reply({
       content: getMessage('suggestion.edit.ok', {
         key: issueKey,

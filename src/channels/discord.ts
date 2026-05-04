@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import {
   AttachmentBuilder,
   Client,
@@ -9,41 +7,27 @@ import {
   MessageFlags,
   Message,
   MessageType,
-  SlashCommandBuilder,
   TextChannel,
   type Interaction,
 } from 'discord.js';
 
-import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
-import { getMessage } from '../tone/index.js';
-import * as notesStore from '../notes-store.js';
-import * as opinionsStore from '../opinions-store.js';
-import {
-  buildPanel as buildNotesPanel,
-  handleInteraction as handleNotesInteraction,
-} from './discord-notes-ui.js';
-import {
-  handleWorkInteraction,
-  handleWorkModal,
-  handleWorkSelect,
-  refreshAllPanels,
-  setDiscordClient as setWorkLedgerClient,
-} from './discord-work-ui.js';
-import {
-  DEFAULT_SENTINEL,
-  EFFORT_CHOICES,
-  MODEL_CHOICES,
-  effortLabel,
-  loadRuntimeSettings,
-  modelLabel,
-  updateRuntimeSettings,
-} from '../group-runtime-settings.js';
 import {
   formatAttachmentReference,
   saveAttachment,
 } from './discord-attachments.js';
+import type {
+  DiscordFeature,
+  DiscordFeatureContext,
+} from './discord-features/feature.js';
+import {
+  createJiraFeature,
+  type JiraFeature,
+} from './discord-features/jira.js';
+import { runtimeControlFeature } from './discord-features/runtime-control.js';
+import { buildEmbedsForMessage } from './discord-sections.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -53,7 +37,6 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
-import { buildEmbedsForMessage } from './discord-sections.js';
 
 export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
@@ -61,23 +44,49 @@ export interface DiscordChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+export interface DiscordChannelConfig {
+  exactJids?: readonly string[];
+  name?: string;
+}
+
 export class DiscordChannel implements Channel {
-  name = 'discord';
+  name: string;
 
   private client: Client | null = null;
   private opts: DiscordChannelOpts;
   private botToken: string;
+  private features: readonly DiscordFeature[];
+  private exactJids: ReadonlySet<string> | null;
   // jid → status message id currently being edited in place.
   // Populated by sendStatus, cleared (with delete()) at sendMessage entry.
   private statusMessages = new Map<string, string>();
-  // Channel JID for the Grafana monitoring group. /daily /weekly /monthly
-  // slash commands are restricted to this channel. Null = commands disabled.
-  private grafanaJid: string | null;
 
-  constructor(botToken: string, opts: DiscordChannelOpts, grafanaJid?: string) {
+  constructor(
+    botToken: string,
+    opts: DiscordChannelOpts,
+    features: readonly DiscordFeature[],
+    config: DiscordChannelConfig = {},
+  ) {
+    this.name = config.name ?? 'discord';
     this.botToken = botToken;
     this.opts = opts;
-    this.grafanaJid = grafanaJid ?? null;
+    this.features = features;
+    this.exactJids = config.exactJids ? new Set(config.exactJids) : null;
+  }
+
+  getFeature<T extends DiscordFeature = DiscordFeature>(
+    name: string,
+  ): T | undefined {
+    return this.features.find((f) => f.name === name) as T | undefined;
+  }
+
+  private buildFeatureContext(): DiscordFeatureContext {
+    return {
+      client: this.client!,
+      registeredGroups: this.opts.registeredGroups,
+      onMessage: this.opts.onMessage,
+      onChatMetadata: this.opts.onChatMetadata,
+    };
   }
 
   async connect(): Promise<void> {
@@ -92,9 +101,7 @@ export class DiscordChannel implements Channel {
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
       // Auto-delete the system "X pinned a message" notification when WE pin.
-      // This is what creates the spam in #추후-수정 every /work-sync. Other
-      // human-driven pins still get cleaned up too — that's fine, the pin
-      // itself remains.
+      // Eliminates pin-spam in the work-ledger panel channel after every refresh.
       if (
         message.type === MessageType.ChannelPinnedMessage &&
         message.author.id === this.client?.user?.id
@@ -130,9 +137,6 @@ export class DiscordChannel implements Channel {
       }
 
       // Translate Discord @bot mentions into TRIGGER_PATTERN format.
-      // Discord mentions look like <@botUserId> — these won't match
-      // TRIGGER_PATTERN (e.g., ^@Andy\b), so we prepend the trigger
-      // when the bot is @mentioned.
       if (this.client?.user) {
         const botId = this.client.user.id;
         const isBotMentioned =
@@ -141,11 +145,9 @@ export class DiscordChannel implements Channel {
           content.includes(`<@!${botId}>`);
 
         if (isBotMentioned) {
-          // Strip the <@botId> mention to avoid visual clutter
           content = content
             .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
             .trim();
-          // Prepend trigger if not already present
           if (!TRIGGER_PATTERN.test(content)) {
             content = `@${ASSISTANT_NAME} ${content}`;
           }
@@ -189,7 +191,6 @@ export class DiscordChannel implements Channel {
       }
 
       // Download attachments to group inbox so the agent can read them.
-      // Only registered groups — avoids filling disk with uninvited files.
       if (message.attachments.size > 0) {
         const results = await Promise.all(
           [...message.attachments.values()].map((att) =>
@@ -235,90 +236,59 @@ export class DiscordChannel implements Channel {
         'Discord message stored',
       );
 
-      // discord_notes channel: keep the channel clean — delete every
-      // non-bot message after it's stored. Bot's own messages (panel,
-      // responses) are left for refreshNotesPanel/auto-delete logic.
+      // Panel channel (work-ledger): keep clean by deleting user messages
+      // immediately after they're stored. Bot messages (panels/ephemerals)
+      // are handled separately.
       if (group.folder === 'discord_notes' && !message.author.bot) {
         try {
           await message.delete();
         } catch (err) {
           logger.warn(
             { err, msgId },
-            'Failed to delete user message in notes channel',
+            'Failed to delete user message in panel channel',
           );
         }
       }
     });
 
-    // Handle errors gracefully
     this.client.on(Events.Error, (err) => {
       logger.error({ err: err.message }, 'Discord client error');
     });
 
-    // Slash command + notes UI handlers (buttons / select / modals)
     this.client.on(
       Events.InteractionCreate,
       async (interaction: Interaction) => {
-        // Notes channel UI: buttons / select menus / modals
-        if (
-          interaction.isButton() ||
-          interaction.isStringSelectMenu() ||
-          interaction.isModalSubmit()
-        ) {
-          const customId = (interaction as { customId?: string }).customId;
-          if (customId?.startsWith('notes:')) {
-            try {
-              const result = await handleNotesInteraction(interaction);
-              if (result.handled && result.mutated) {
-                const channelId = (interaction as { channelId?: string })
-                  .channelId;
-                if (channelId) {
-                  await this.refreshNotesPanel(`dc:${channelId}`);
-                }
-              }
-            } catch (err) {
-              logger.error({ err }, 'Notes interaction handling failed');
-            }
-            return;
-          }
-          if (customId?.startsWith('work:')) {
-            try {
-              if (interaction.isButton()) {
-                await handleWorkInteraction(interaction);
-              } else if (interaction.isStringSelectMenu()) {
-                await handleWorkSelect(interaction);
-              } else if (interaction.isModalSubmit()) {
-                await handleWorkModal(interaction);
-              }
-            } catch (err) {
-              logger.error({ err }, 'Work interaction handling failed');
-            }
-            return;
-          }
-        }
+        const ctx = this.buildFeatureContext();
 
-        if (!interaction.isChatInputCommand()) return;
-        const cmd = interaction.commandName;
-        if (cmd === 'model' || cmd === 'effort' || cmd === 'compact') {
-          await this.handleRuntimeCommand(interaction);
+        if (interaction.isButton()) {
+          for (const f of this.features) {
+            if (!f.handleButton) continue;
+            const handled = await f.handleButton(interaction, ctx);
+            if (handled) return;
+          }
           return;
         }
-        if (cmd === 'daily' || cmd === 'weekly' || cmd === 'monthly') {
-          await this.handleGrafanaSummaryCommand(interaction, cmd);
+        if (interaction.isStringSelectMenu()) {
+          for (const f of this.features) {
+            if (!f.handleSelect) continue;
+            const handled = await f.handleSelect(interaction, ctx);
+            if (handled) return;
+          }
           return;
         }
-        if (cmd === 'work-sync') {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          try {
-            const ok = await refreshAllPanels(this.client!);
-            await interaction.editReply(
-              ok
-                ? getMessage('workSync.ok')
-                : '동기화 실패 — #추후-수정 채널 못 찾음',
-            );
-          } catch (err) {
-            logger.error({ err }, 'work-sync failed');
-            await interaction.editReply('동기화 중 에러 — 로그 확인');
+        if (interaction.isModalSubmit()) {
+          for (const f of this.features) {
+            if (!f.handleModal) continue;
+            const handled = await f.handleModal(interaction, ctx);
+            if (handled) return;
+          }
+          return;
+        }
+        if (interaction.isChatInputCommand()) {
+          for (const f of this.features) {
+            if (!f.handleCommand) continue;
+            const handled = await f.handleCommand(interaction, ctx);
+            if (handled) return;
           }
           return;
         }
@@ -328,10 +298,21 @@ export class DiscordChannel implements Channel {
     return new Promise<void>((resolve) => {
       this.client!.once(Events.ClientReady, async (readyClient) => {
         logger.info(
-          { username: readyClient.user.tag, id: readyClient.user.id },
+          {
+            channel: this.name,
+            username: readyClient.user.tag,
+            id: readyClient.user.id,
+          },
           'Discord bot connected',
         );
-        setWorkLedgerClient(this.client!);
+        for (const f of this.features) {
+          if (!f.onReady) continue;
+          try {
+            await f.onReady({ client: this.client! });
+          } catch (err) {
+            logger.warn({ err, feature: f.name }, 'feature onReady failed');
+          }
+        }
         console.log(`\n  Discord bot: ${readyClient.user.tag}`);
         console.log(
           `  Use /chatid command or check channel IDs in Discord settings\n`,
@@ -341,8 +322,6 @@ export class DiscordChannel implements Channel {
         } catch (err) {
           logger.error({ err }, 'Failed to register slash commands');
         }
-        // Legacy notes panel auto-refresh disabled — work-ledger UI now owns
-        // the discord_notes channel pin. Refresh via /work-sync or webhook.
         resolve();
       });
 
@@ -350,62 +329,15 @@ export class DiscordChannel implements Channel {
     });
   }
 
+  private collectSlashCommands() {
+    return this.features.flatMap((f) => f.slashCommands());
+  }
+
   private async registerSlashCommands(): Promise<void> {
     if (!this.client?.application) return;
-    const commands = [
-      new SlashCommandBuilder()
-        .setName('model')
-        .setDescription('이 채널에서 사용할 Claude 모델 확인/변경')
-        .addStringOption((opt) =>
-          opt
-            .setName('choice')
-            .setDescription('사용할 모델 (생략 시 현재 설정 조회)')
-            .setRequired(false)
-            .addChoices(
-              ...MODEL_CHOICES.map((c) => ({ name: c.label, value: c.value })),
-              { name: '기본값 (SDK 기본 모델 사용)', value: DEFAULT_SENTINEL },
-            ),
-        )
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('effort')
-        .setDescription('이 채널의 추론 깊이(effort) 확인/변경')
-        .addStringOption((opt) =>
-          opt
-            .setName('level')
-            .setDescription('추론 레벨 (생략 시 현재 설정 조회)')
-            .setRequired(false)
-            .addChoices(
-              ...EFFORT_CHOICES.map((c) => ({ name: c.label, value: c.value })),
-            ),
-        )
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('compact')
-        .setDescription(
-          '이 채널의 대화 세션을 압축 (컨텍스트 로트 방지) — main/admin 전용',
-        )
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('daily')
-        .setDescription('일간 메트릭 요약 즉시 실행 (#grafana 전용)')
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('weekly')
-        .setDescription('주간 트렌드 요약 즉시 실행 (#grafana 전용)')
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('monthly')
-        .setDescription('월간 SLI 리뷰 즉시 실행 (#grafana 전용)')
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('work-sync')
-        .setDescription('작업 렛저 강제 동기화 (Jira 풀 + 핀 메시지 갱신)')
-        .toJSON(),
-    ];
+    const commands = this.collectSlashCommands();
 
-    // Clear any lingering global registrations from previous versions —
-    // otherwise they show up as duplicates alongside the guild-scoped ones.
+    // Clear lingering global registrations from older versions.
     try {
       await this.client.application.commands.set([]);
       logger.info('Cleared global slash command registrations');
@@ -413,13 +345,11 @@ export class DiscordChannel implements Channel {
       logger.warn({ err }, 'Failed to clear global slash commands');
     }
 
-    // Register per-guild for instant visibility. Also covers guilds the bot
-    // joins later via the guildCreate handler set up below.
     for (const [guildId, guild] of this.client.guilds.cache) {
       try {
         await guild.commands.set(commands);
         logger.info(
-          { guildId, guildName: guild.name },
+          { guildId, guildName: guild.name, count: commands.length },
           'Slash commands registered for guild',
         );
       } catch (err) {
@@ -430,8 +360,6 @@ export class DiscordChannel implements Channel {
       }
     }
 
-    // Re-register when the bot joins a new guild so /compact etc. work
-    // immediately in new servers without waiting for global propagation.
     this.client.on(Events.GuildCreate, async (guild) => {
       try {
         await guild.commands.set(commands);
@@ -448,164 +376,9 @@ export class DiscordChannel implements Channel {
     });
   }
 
-  private async handleRuntimeCommand(
-    interaction: import('discord.js').ChatInputCommandInteraction,
-  ): Promise<void> {
-    const chatJid = `dc:${interaction.channelId}`;
-    const group = this.opts.registeredGroups()[chatJid];
-    if (!group) {
-      await interaction.reply({
-        content: '이 채널은 NanoClaw에 등록되지 않았습니다.',
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    try {
-      if (interaction.commandName === 'model') {
-        const choice = interaction.options.getString('choice');
-        if (choice === null) {
-          const cur = loadRuntimeSettings(group.folder);
-          await interaction.reply({
-            content: `현재 설정 — 모델: **${modelLabel(cur.model)}** · effort: **${effortLabel(cur.effort)}**`,
-            flags: MessageFlags.Ephemeral,
-          });
-          return;
-        }
-        const next = updateRuntimeSettings(group.folder, { model: choice });
-        await interaction.reply({
-          content: `모델 변경 완료 → **${modelLabel(next.model)}** (다음 메시지부터 적용)`,
-          flags: MessageFlags.Ephemeral,
-        });
-        return;
-      }
-      if (interaction.commandName === 'effort') {
-        const level = interaction.options.getString('level');
-        if (level === null) {
-          const cur = loadRuntimeSettings(group.folder);
-          await interaction.reply({
-            content: `현재 설정 — 모델: **${modelLabel(cur.model)}** · effort: **${effortLabel(cur.effort)}**`,
-            flags: MessageFlags.Ephemeral,
-          });
-          return;
-        }
-        const next = updateRuntimeSettings(group.folder, { effort: level });
-        await interaction.reply({
-          content: `Effort 변경 완료 → **${effortLabel(next.effort)}** (다음 메시지부터 적용)`,
-          flags: MessageFlags.Ephemeral,
-        });
-        return;
-      }
-      if (interaction.commandName === 'compact') {
-        // Trigger the host-side session-command interception by injecting a
-        // synthetic "/compact" message as if the admin had typed it. The
-        // orchestrator's handleSessionCommand picks it up and runs the SDK
-        // /compact flow in a fresh container (transcript archived via the
-        // PreCompact hook). Only the device owner can drive this path.
-        const userId = interaction.user.id;
-        const ownerId = process.env.DISCORD_OWNER_ID;
-        const isOwner = ownerId ? userId === ownerId : false;
-        if (!isOwner && !group.isMain) {
-          await interaction.reply({
-            content: 'Session commands require admin access.',
-            flags: MessageFlags.Ephemeral,
-          });
-          return;
-        }
-
-        await interaction.reply({
-          content: '세션 압축 시작 — 끝나면 채널에 결과 메시지 올라올게.',
-          flags: MessageFlags.Ephemeral,
-        });
-
-        const now = new Date().toISOString();
-        const synthetic: NewMessage = {
-          id: `compact-${Date.now()}`,
-          chat_jid: chatJid,
-          sender: userId,
-          sender_name: interaction.user.username,
-          content: '/compact',
-          timestamp: now,
-          is_from_me: true,
-        };
-        // Channels deliver inbound messages via opts.onInboundMessage — same
-        // path a real Discord message would take, so the orchestrator's
-        // session-command interception (handleSessionCommand) triggers.
-        this.opts.onChatMetadata(chatJid, now);
-        this.opts.onMessage(chatJid, synthetic);
-        return;
-      }
-    } catch (err) {
-      logger.error(
-        { err, commandName: interaction.commandName },
-        'Slash command handler error',
-      );
-      if (!interaction.replied) {
-        await interaction
-          .reply({
-            content: '명령 실행 실패. 서버 로그를 확인해주세요.',
-            flags: MessageFlags.Ephemeral,
-          })
-          .catch(() => {});
-      }
-    }
-  }
-
-  private async handleGrafanaSummaryCommand(
-    interaction: import('discord.js').ChatInputCommandInteraction,
-    kind: 'daily' | 'weekly' | 'monthly',
-  ): Promise<void> {
-    const channelJid = `dc:${interaction.channelId}`;
-    if (!this.grafanaJid || channelJid !== this.grafanaJid) {
-      await interaction.reply({
-        content: `\`/${kind}\` 명령은 #grafana 모니터링 채널에서만 사용할 수 있습니다.`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    const labels = { daily: '일간', weekly: '주간', monthly: '월간' };
-    const label = labels[kind];
-
-    const promptMap: Record<typeof kind, string> = {
-      daily: `@${ASSISTANT_NAME} /daily — 지난 24시간 일간 메트릭 요약을 한국어 마크다운으로 작성해 채널에 게시. 포함: 총 요청량, 5xx 비율, p95/p99 latency, 다운타임 분, 발화한 알람 수/이름.`,
-      weekly: `@${ASSISTANT_NAME} /weekly — 지난 7일 주간 트렌드 요약을 한국어 마크다운으로 작성해 채널에 게시. 일별 평균/최댓값, 전주 대비 ±%, 워스트 케이스 시점, 발화 알람 목록.`,
-      monthly: `@${ASSISTANT_NAME} /monthly — 지난 30일 월간 SLI 리뷰를 한국어 마크다운으로 작성해 채널에 게시. 가용성(uptime%), 5xx 분포, p95/p99 latency 분포, 알람 타임라인, 주요 인시던트 회고.`,
-    };
-
-    await interaction.reply({
-      content: `🔄 ${label} 요약 시작합니다. 잠시만 기다려주세요.`,
-      flags: MessageFlags.Ephemeral,
-    });
-
-    const now = new Date().toISOString();
-    const senderName =
-      interaction.member?.user?.username ??
-      interaction.user.displayName ??
-      interaction.user.username;
-    const msg: NewMessage = {
-      id: `slash-${kind}-${Date.now()}`,
-      chat_jid: channelJid,
-      sender: interaction.user.id,
-      sender_name: senderName,
-      content: promptMap[kind],
-      timestamp: now,
-      is_from_me: true,
-      is_bot_message: false,
-    };
-    this.opts.onMessage(channelJid, msg);
-
-    logger.info(
-      { kind, channelJid, sender: senderName, msgId: msg.id },
-      'Grafana summary slash command dispatched',
-    );
-  }
-
   async sendStatus(jid: string, text: string): Promise<void> {
     if (!this.client) return;
 
-    // Tool-use status already carries its own leading emoji (📖/⚡/🔍/…).
-    // Italic keeps the "live progress" feel without duplicating the emoji.
     const formatted = `*${text}*`.slice(0, 2000);
 
     try {
@@ -621,7 +394,6 @@ export class DiscordChannel implements Channel {
           await existing.edit({ content: formatted });
           return;
         } catch {
-          // Message was deleted or missing — fall through to a fresh send.
           this.statusMessages.delete(jid);
         }
       }
@@ -671,16 +443,10 @@ export class DiscordChannel implements Channel {
       const textChannel = channel as TextChannel;
       await this.clearStatus(jid, textChannel);
 
-      // discord_notes channel: legacy notes-ui panel is replaced by the new
-      // work-ledger UI (refreshed via /work-sync, not auto on every message).
+      // Panel channel (work-ledger): TTL-delete the bot's own response
+      // messages so the channel stays focused on the pinned panels.
       const groupForJid = this.opts.registeredGroups()[jid];
-      const isNotesChannel = groupForJid?.folder === 'discord_notes';
-      void isNotesChannel; // kept for potential future per-channel branching
-      let aiResponseSent = false;
-      const sendNotesPanelAfter = async () => {
-        // no-op: legacy notes panel disabled; work-ledger panel is managed
-        // explicitly by /work-sync and (later) webhook + cron.
-      };
+      const isPanelChannel = groupForJid?.folder === 'discord_notes';
       const inboundFiles =
         files && files.length > 0
           ? files.map((f) => new AttachmentBuilder(f))
@@ -692,21 +458,16 @@ export class DiscordChannel implements Channel {
         attachments: tableAttachments,
       } = await buildEmbedsForMessage(text, metadata);
 
-      // Image-embed `attachment://...` URLs must travel with the FIRST send().
-      // Discord matches attachments by filename, so inbound files go with the
-      // first payload too (existing behavior).
       const firstBatchFiles = [...inboundFiles, ...tableAttachments];
 
       const sentMessages: Message[] = [];
 
-      // Empty text but attachments present — send files with no embed.
       if (embeds.length === 0) {
         if (firstBatchFiles.length > 0) {
           const m = await textChannel.send({ files: firstBatchFiles });
           sentMessages.push(m);
         }
-        if (isNotesChannel) this.scheduleNotesMessageDelete(sentMessages);
-        await sendNotesPanelAfter();
+        if (isPanelChannel) this.scheduleEphemeralDelete(sentMessages);
         return;
       }
 
@@ -732,7 +493,7 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      if (isNotesChannel) this.scheduleNotesMessageDelete(sentMessages);
+      if (isPanelChannel) this.scheduleEphemeralDelete(sentMessages);
 
       logger.info(
         {
@@ -745,98 +506,26 @@ export class DiscordChannel implements Channel {
         },
         'Discord message sent',
       );
-      aiResponseSent = embeds.length > 0 || overflowText.length > 0;
-      // After the AI response posts, re-pin the notes panel at the bottom.
-      // Suppress unused warning; aiResponseSent is read here to keep the
-      // semantic clear that we send the panel even if the response was empty.
-      void aiResponseSent;
-      await sendNotesPanelAfter();
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
     }
   }
 
   /**
-   * For the discord_notes channel: delete any previous panel message and post
-   * a fresh one at the bottom. Stores the new message id in the group's
-   * .notes-panel.json so the next refresh can find and delete it again.
+   * Auto-delete bot response messages after a TTL. Used in the panel channel
+   * to keep the conversation focused on the pinned work-ledger panels.
    */
-  private scheduleNotesMessageDelete(messages: Message[]): void {
+  private scheduleEphemeralDelete(messages: Message[]): void {
     const TTL_MS = 60_000;
     for (const m of messages) {
       setTimeout(() => {
         m.delete().catch((err) => {
           logger.debug(
             { err, id: m.id },
-            'Notes channel auto-delete failed (already gone?)',
+            'Panel channel auto-delete failed (already gone?)',
           );
         });
       }, TTL_MS);
-    }
-  }
-
-  private async refreshAllNotesPanels(): Promise<void> {
-    const groups = this.opts.registeredGroups();
-    const targets = Object.entries(groups).filter(
-      ([jid, g]) => g.folder === 'discord_notes' && jid.startsWith('dc:'),
-    );
-    for (const [jid] of targets) {
-      try {
-        await this.refreshNotesPanel(jid);
-        logger.info({ jid }, 'Refreshed notes panel on startup');
-      } catch (err) {
-        logger.warn({ jid, err }, 'Notes panel refresh failed on startup');
-      }
-    }
-  }
-
-  private async refreshNotesPanel(jid: string): Promise<void> {
-    if (!this.client) return;
-    try {
-      const channelId = jid.replace(/^dc:/, '');
-      const channel = await this.client.channels.fetch(channelId);
-      if (!channel || !('send' in channel)) return;
-      const textChannel = channel as TextChannel;
-
-      const stateFile = path.join(
-        GROUPS_DIR,
-        'discord_notes',
-        '.notes-panel.json',
-      );
-      let prevId: string | undefined;
-      try {
-        const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-        prevId = raw.lastPanelMessageId;
-      } catch {
-        // first run or corrupt — ignore
-      }
-
-      // Best-effort delete previous panel
-      if (prevId) {
-        try {
-          const prev = await textChannel.messages.fetch(prevId);
-          await prev.delete();
-        } catch {
-          // already deleted or not found
-        }
-      }
-
-      notesStore.bootstrap();
-      opinionsStore.bootstrap();
-      const panel = buildNotesPanel();
-      const sent = await textChannel.send({
-        embeds: panel.embeds,
-        components: panel.components,
-      });
-
-      fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-      fs.writeFileSync(
-        stateFile,
-        JSON.stringify({ lastPanelMessageId: sent.id }, null, 2),
-        'utf-8',
-      );
-    } catch (err) {
-      logger.error({ err, jid }, 'Failed to refresh notes panel');
     }
   }
 
@@ -844,15 +533,22 @@ export class DiscordChannel implements Channel {
     return this.client !== null && this.client.isReady();
   }
 
+  matchJid(jid: string): number {
+    if (this.exactJids) {
+      return this.exactJids.has(jid) ? 2 : 0;
+    }
+    return jid.startsWith('dc:') ? 1 : 0;
+  }
+
   ownsJid(jid: string): boolean {
-    return jid.startsWith('dc:');
+    return this.matchJid(jid) > 0;
   }
 
   async disconnect(): Promise<void> {
     if (this.client) {
       this.client.destroy();
       this.client = null;
-      logger.info('Discord bot stopped');
+      logger.info({ channel: this.name }, 'Discord bot stopped');
     }
   }
 
@@ -871,14 +567,32 @@ export class DiscordChannel implements Channel {
 }
 
 registerChannel('discord', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['DISCORD_BOT_TOKEN', 'WEBHOOK_GRAFANA_JID']);
+  const envVars = readEnvFile([
+    'DISCORD_BOT_TOKEN',
+    'DISCORD_JIRA_PANEL_CHANNEL_ID',
+  ]);
   const token =
     process.env.DISCORD_BOT_TOKEN || envVars.DISCORD_BOT_TOKEN || '';
   if (!token) {
     logger.warn('Discord: DISCORD_BOT_TOKEN not set');
     return null;
   }
-  const grafanaJid =
-    process.env.WEBHOOK_GRAFANA_JID || envVars.WEBHOOK_GRAFANA_JID || undefined;
-  return new DiscordChannel(token, opts, grafanaJid);
+
+  const panelChannelId =
+    process.env.DISCORD_JIRA_PANEL_CHANNEL_ID ||
+    envVars.DISCORD_JIRA_PANEL_CHANNEL_ID ||
+    '';
+
+  const features: DiscordFeature[] = [runtimeControlFeature];
+  if (panelChannelId) {
+    features.push(createJiraFeature({ panelChannelId }));
+  } else {
+    logger.warn(
+      'DISCORD_JIRA_PANEL_CHANNEL_ID not set — jira feature disabled',
+    );
+  }
+
+  return new DiscordChannel(token, opts, features);
 });
+
+export type { JiraFeature };

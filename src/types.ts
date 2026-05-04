@@ -108,6 +108,8 @@ export interface Channel {
     metadata?: MessageMetadata,
   ): Promise<void>;
   isConnected(): boolean;
+  // Higher score wins when multiple channel instances can handle the same JID.
+  matchJid?(jid: string): number;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.

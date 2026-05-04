@@ -3,6 +3,7 @@
 
 // discord
 import './discord.js';
+import './discord-monitoring.js';
 
 // gmail
 

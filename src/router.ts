@@ -1,6 +1,13 @@
 import { Channel, NewMessage } from './types.js';
 import { formatLocalTime } from './timezone.js';
 
+function matchScore(channel: Channel, jid: string): number {
+  if (channel.matchJid) {
+    return channel.matchJid(jid);
+  }
+  return channel.ownsJid(jid) ? 1 : 0;
+}
+
 export function escapeXml(s: string): string {
   if (!s) return '';
   return s
@@ -48,7 +55,18 @@ export function routeOutbound(
   text: string,
   files?: string[],
 ): Promise<void> {
-  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
+  const channel = channels
+    .filter((c) => c.isConnected())
+    .reduce<{ channel: Channel | undefined; score: number }>(
+      (best, candidate) => {
+        const score = matchScore(candidate, jid);
+        if (score > best.score) {
+          return { channel: candidate, score };
+        }
+        return best;
+      },
+      { channel: undefined, score: 0 },
+    ).channel;
   if (!channel) throw new Error(`No channel for JID: ${jid}`);
   return channel.sendMessage(jid, text, files);
 }
@@ -57,5 +75,14 @@ export function findChannel(
   channels: Channel[],
   jid: string,
 ): Channel | undefined {
-  return channels.find((c) => c.ownsJid(jid));
+  return channels.reduce<{ channel: Channel | undefined; score: number }>(
+    (best, candidate) => {
+      const score = matchScore(candidate, jid);
+      if (score > best.score) {
+        return { channel: candidate, score };
+      }
+      return best;
+    },
+    { channel: undefined, score: 0 },
+  ).channel;
 }

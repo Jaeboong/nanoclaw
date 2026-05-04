@@ -77,10 +77,8 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { startWebhookServer } from './webhook-server.js';
-import {
-  getDiscordClient,
-  refreshSuggestionsPanel,
-} from './channels/discord-work-ui.js';
+import { DiscordChannel } from './channels/discord.js';
+import type { JiraFeature } from './channels/discord-features/jira.js';
 import {
   appendSuggestions,
   buildSuggestionFromMR,
@@ -874,11 +872,16 @@ async function main(): Promise<void> {
           const built = buildSuggestionFromMR(payload as GitlabMRPayloadLite);
           added = built ? appendSuggestions([built]) : [];
         }
-        const client = getDiscordClient();
-        if (client && added.length > 0) {
-          refreshSuggestionsPanel(client).catch((err) =>
-            logger.warn({ err }, 'sugg pin refresh failed after webhook'),
+        if (added.length > 0) {
+          const discord = channels.find(
+            (c): c is DiscordChannel => c instanceof DiscordChannel,
           );
+          const jira = discord?.getFeature<JiraFeature>('jira');
+          jira
+            ?.refreshSuggestionsPanel()
+            .catch((err) =>
+              logger.warn({ err }, 'sugg pin refresh failed after webhook'),
+            );
         }
         return {
           summary: `event=${eventHeader} added=${added.length}`,
