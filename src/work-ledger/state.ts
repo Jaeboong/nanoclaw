@@ -1,6 +1,8 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
+import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 
 export type Side = 'fe' | 'be';
@@ -56,7 +58,12 @@ export interface WorkLedgerState {
   lastJiraFetch: string | null; // ISO
 }
 
-const STATE_DIR = '/home/ubuntu/ddonyang/work-ledger';
+const envConfig = readEnvFile(['NANOCLAW_DATA_DIR']);
+const DATA_DIR =
+  process.env.NANOCLAW_DATA_DIR ||
+  envConfig.NANOCLAW_DATA_DIR ||
+  path.join(os.homedir(), 'nanoclaw-data');
+const STATE_DIR = path.join(DATA_DIR, 'work-ledger');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 
 const EMPTY: WorkLedgerState = {

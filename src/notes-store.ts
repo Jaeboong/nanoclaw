@@ -1,20 +1,27 @@
 /**
  * Notes store for the discord_notes (#추후-수정) channel.
  *
- * Source of truth: JSON files under DDONYANG_DIR. Markdown view files are
- * regenerated on every change so humans (and the AI agent on natural-language
- * mentions) always see the same data.
+ * Source of truth: JSON files under NANOCLAW_DATA_DIR. Markdown view files
+ * are regenerated on every change so humans (and the AI agent on
+ * natural-language mentions) always see the same data.
  */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
-const DDONYANG_DIR = process.env.DDONYANG_DIR ?? '/home/ubuntu/ddonyang';
+import { readEnvFile } from './env.js';
 
-const FOLLOWUPS_JSON = path.join(DDONYANG_DIR, 'followups.json');
-const FOLLOWUPS_MD = path.join(DDONYANG_DIR, 'followups.md');
-const ARCHIVE_JSON = path.join(DDONYANG_DIR, 'archive.json');
-const ARCHIVE_MD = path.join(DDONYANG_DIR, 'archive.md');
-const STATE_JSON = path.join(DDONYANG_DIR, 'state.json');
+const envConfig = readEnvFile(['NANOCLAW_DATA_DIR']);
+const DATA_DIR =
+  process.env.NANOCLAW_DATA_DIR ||
+  envConfig.NANOCLAW_DATA_DIR ||
+  path.join(os.homedir(), 'nanoclaw-data');
+
+const FOLLOWUPS_JSON = path.join(DATA_DIR, 'followups.json');
+const FOLLOWUPS_MD = path.join(DATA_DIR, 'followups.md');
+const ARCHIVE_JSON = path.join(DATA_DIR, 'archive.json');
+const ARCHIVE_MD = path.join(DATA_DIR, 'archive.md');
+const STATE_JSON = path.join(DATA_DIR, 'state.json');
 
 export type Priority = 'high' | 'mid' | 'low';
 export type Status = 'open' | 'done' | 'cancelled';
@@ -50,7 +57,7 @@ const STATUS_LABEL: Record<Status, string> = {
 const DEFAULT_CATEGORIES = ['be', 'fe', 'infra', 'docs', 'etc'];
 
 function ensureDir(): void {
-  fs.mkdirSync(DDONYANG_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 function readJson<T>(file: string, fallback: T): T {

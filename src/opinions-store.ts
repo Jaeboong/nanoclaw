@@ -2,17 +2,24 @@
  * Opinions store for the discord_notes (#추후-수정) channel.
  *
  * Each opinion is a free-form comment with an author (Discord user). Lives
- * alongside followups under DDONYANG_DIR. Markdown view is regenerated on
- * every change.
+ * alongside followups under NANOCLAW_DATA_DIR. Markdown view is regenerated
+ * on every change.
  */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
-const DDONYANG_DIR = process.env.DDONYANG_DIR ?? '/home/ubuntu/ddonyang';
+import { readEnvFile } from './env.js';
 
-const OPINIONS_JSON = path.join(DDONYANG_DIR, 'opinions.json');
-const OPINIONS_MD = path.join(DDONYANG_DIR, 'opinions.md');
-const OPINIONS_STATE_JSON = path.join(DDONYANG_DIR, 'opinions-state.json');
+const envConfig = readEnvFile(['NANOCLAW_DATA_DIR']);
+const DATA_DIR =
+  process.env.NANOCLAW_DATA_DIR ||
+  envConfig.NANOCLAW_DATA_DIR ||
+  path.join(os.homedir(), 'nanoclaw-data');
+
+const OPINIONS_JSON = path.join(DATA_DIR, 'opinions.json');
+const OPINIONS_MD = path.join(DATA_DIR, 'opinions.md');
+const OPINIONS_STATE_JSON = path.join(DATA_DIR, 'opinions-state.json');
 
 export interface OpinionItem {
   id: number;
@@ -28,7 +35,7 @@ interface OpinionsState {
 }
 
 function ensureDir(): void {
-  fs.mkdirSync(DDONYANG_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 function readJson<T>(file: string, fallback: T): T {
