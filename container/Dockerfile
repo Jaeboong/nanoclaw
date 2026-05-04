@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     poppler-utils \
+    python3 \
+    python3-venv \
     ca-certificates \
     gnupg \
     && install -m 0755 -d /etc/apt/keyrings \
@@ -41,6 +43,18 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install agent-browser and claude-code globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code
+
+# Install jira CLI (jira_automation) into an isolated venv on PATH.
+# Source lives in container/jira-automation/ — the docker build context.
+COPY jira-automation /opt/jira-cli-src
+RUN python3 -m venv /opt/jira-cli \
+    && /opt/jira-cli/bin/pip install --no-cache-dir /opt/jira-cli-src \
+    && rm -rf /opt/jira-cli-src
+ENV PATH="/opt/jira-cli/bin:${PATH}"
+
+# When the host mounts /home/ubuntu/.config/jira-automation -> /workspace/extra/jira-automation,
+# the `jira` CLI picks up .env + convention.md from that location automatically.
+ENV JIRA_CONFIG_DIR="/workspace/extra/jira-automation"
 
 # Create app directory
 WORKDIR /app

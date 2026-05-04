@@ -276,6 +276,14 @@ async function buildContainerArgs(
   });
   if (onecliApplied) {
     logger.info({ containerName }, 'OneCLI gateway config applied');
+    // OneCLI's SDK only sets SSL_CERT_FILE (read by Python ssl, OpenSSL).
+    // Python `requests` library and curl ignore that — they need their own
+    // env vars pointing at the same combined CA bundle. Without these, any
+    // Python tool inside the container (e.g. the `jira` CLI) hits
+    // "self-signed certificate in certificate chain" when going through
+    // OneCLI's MITM proxy.
+    args.push('-e', 'REQUESTS_CA_BUNDLE=/tmp/onecli-combined-ca.pem');
+    args.push('-e', 'CURL_CA_BUNDLE=/tmp/onecli-combined-ca.pem');
   } else {
     logger.warn(
       { containerName },
