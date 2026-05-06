@@ -53,6 +53,10 @@ The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `update_task` — update an existing task
 - `register_group` — register a new chat/group (main only)
 
+If `DART_API_KEY` is set:
+- MCP: `mcp__dart__company_info`, `mcp__dart__list_filings`, `mcp__dart__financial_statements`
+- CLI: `dart-tool`
+
 ### 4. Container skills (Bash tools)
 
 Check for executable tools in the container:
