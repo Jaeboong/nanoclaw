@@ -39,3 +39,9 @@ src/tone/ddonyang.ts
 .nanoclaw/
 
 agents-sdk-docs
+
+# Personal completed-plan notes (per-installation context; channel IDs, project names)
+docs/plans/completed_plans/
+
+# Personal observability artifacts (project-specific dashboards, host overlays)
+ops/observability-host/grafana/dashboards/jasojeon-*.json

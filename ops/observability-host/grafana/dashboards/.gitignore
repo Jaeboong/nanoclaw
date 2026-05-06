@@ -1,0 +1,2 @@
+*.json
+!per-container-logs.json

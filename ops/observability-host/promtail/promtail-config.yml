@@ -1,0 +1,57 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container'
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: 'stream'
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        target_label: 'compose_project'
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'compose_service'
+    pipeline_stages:
+      - docker: {}
+      # To extract metrics from a specific service's access log, add a match block.
+      # Example for an nginx combined-format access log scoped to a Compose project:
+      #
+      # - match:
+      #     selector: '{compose_project="myproject", compose_service="nginx"}'
+      #     stages:
+      #       - regex:
+      #           expression: '^(?P<client_ip>\S+) \S+ \S+ \[[^\]]+\] "(?:(?P<method>\S+) (?P<path>\S+) (?P<protocol>[^"]+))?" (?P<status>\d+) (?P<bytes>\d+) "(?P<referer>[^"]*)" "(?P<user_agent>[^"]*)"'
+      #       - template:
+      #           source: status_class
+      #           template: '{{ if and (ge .status "200") (lt .status "300") }}2xx{{ else if and (ge .status "300") (lt .status "400") }}3xx{{ else if and (ge .status "400") (lt .status "500") }}4xx{{ else if ge .status "500" }}5xx{{ else }}other{{ end }}'
+      #       - labels:
+      #           method:
+      #           status:
+      #           status_class:
+      #       - metrics:
+      #           nginx_requests_total:
+      #             type: Counter
+      #             description: nginx total HTTP requests
+      #             source: status
+      #             config:
+      #               action: inc
+      #           nginx_bytes_sent_total:
+      #             type: Counter
+      #             description: nginx bytes sent total
+      #             source: bytes
+      #             config:
+      #               action: add
+      # Note: promtail prepends `promtail_custom_` to metric names exported on /metrics.

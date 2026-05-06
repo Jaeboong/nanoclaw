@@ -13,8 +13,7 @@ import type {
   RegisteredGroup,
 } from '../../types.js';
 
-export type SlashCommandJSON =
-  RESTPostAPIChatInputApplicationCommandsJSONBody;
+export type SlashCommandJSON = RESTPostAPIChatInputApplicationCommandsJSONBody;
 
 export interface DiscordFeatureContext {
   readonly client: Client;
