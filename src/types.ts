@@ -29,6 +29,7 @@ export interface AllowedRoot {
 
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
+  envVars?: string[];
   timeout?: number; // Default: 300000 (5 minutes)
 }
 

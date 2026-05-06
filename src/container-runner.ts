@@ -17,6 +17,11 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
+import {
+  resolveContainerEnv,
+  type ResolvedContainerEnv,
+} from './env-passthrough.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { groupNamespace, IpcNamespace } from './ipc-namespace.js';
 import { loadRuntimeSettings } from './group-runtime-settings.js';
@@ -260,6 +265,7 @@ function buildVolumeMounts(
 
 async function buildContainerArgs(
   mounts: VolumeMount[],
+  env: ResolvedContainerEnv[],
   containerName: string,
   agentIdentifier?: string,
 ): Promise<string[]> {
@@ -302,6 +308,10 @@ async function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  for (const entry of env) {
+    args.push('-e', `${entry.name}=${entry.value}`);
   }
 
   for (const mount of mounts) {
@@ -358,6 +368,21 @@ async function buildContainerArgs(
   return args;
 }
 
+function redactContainerArgsForLog(args: string[]): string {
+  const redacted: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    redacted.push(arg);
+    if (arg !== '-e' && arg !== '--env') continue;
+    const value = args[i + 1];
+    if (value === undefined) continue;
+    const eqIdx = value.indexOf('=');
+    redacted.push(eqIdx === -1 ? value : `${value.slice(0, eqIdx)}=<redacted>`);
+    i += 1;
+  }
+  return redacted.join(' ');
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -371,6 +396,12 @@ export async function runContainerAgent(
 
   const ipcNamespace = input.ipcNamespace ?? groupNamespace(group.folder);
   const mounts = buildVolumeMounts(group, input.isMain, ipcNamespace);
+  const requestedEnvVars = group.containerConfig?.envVars ?? [];
+  const envFileValues = readEnvFile(requestedEnvVars);
+  const resolvedEnv = resolveContainerEnv(requestedEnvVars, {
+    ...envFileValues,
+    ...process.env,
+  });
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const nameSuffix = ipcNamespace.taskId
     ? `${safeName}-bg-${ipcNamespace.taskId}`
@@ -382,6 +413,7 @@ export async function runContainerAgent(
     : group.folder.toLowerCase().replace(/_/g, '-');
   const containerArgs = await buildContainerArgs(
     mounts,
+    resolvedEnv,
     containerName,
     agentIdentifier,
   );
@@ -394,7 +426,8 @@ export async function runContainerAgent(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
       ),
-      containerArgs: containerArgs.join(' '),
+      envVars: resolvedEnv.map((entry) => entry.name),
+      containerArgs: redactContainerArgsForLog(containerArgs),
     },
     'Container mount configuration',
   );

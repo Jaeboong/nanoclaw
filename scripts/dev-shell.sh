@@ -78,6 +78,24 @@ while IFS= read -r arg; do
   [[ -n "$arg" ]] && ARGS+=("$arg")
 done < <(node -e "console.log(JSON.parse(process.argv[1]).join('\n'))" "$ONECLI_ARGS")
 
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  value="${!name:-}"
+  [[ -n "$value" ]] && ARGS+=(-e "$name=$value")
+done < <(node -e "
+  const cfg = JSON.parse(process.argv[1]).container_config;
+  if (!cfg) process.exit(0);
+  const parsed = JSON.parse(cfg);
+  const valid = /^[A-Z_][A-Z0-9_]*$/;
+  const seen = new Set();
+  for (const raw of parsed.envVars || []) {
+    const name = String(raw).trim();
+    if (!valid.test(name) || seen.has(name)) continue;
+    seen.add(name);
+    console.log(name);
+  }
+" "$GROUP_JSON")
+
 # Runtime host gateway (Linux docker)
 ARGS+=(--add-host "host.docker.internal:host-gateway")
 
