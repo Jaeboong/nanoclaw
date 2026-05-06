@@ -38,6 +38,7 @@ esac
 
 mapfile -t files < <(
   git ls-files \
+    | grep -Ev '^\.boundaries-baseline$' \
     | grep -Ev '^(node_modules|dist|agents-sdk-docs)/' \
     | grep -Ev '/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$' \
     | grep -Ev '\.(png|jpg|jpeg|gif|ico|pdf|zip|tar\.gz|tgz|woff2?|ttf|otf|eot|mp3|mp4|wav|webp)$'
