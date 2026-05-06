@@ -123,7 +123,8 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 
 1. **Link related issues.** If your PR resolves an open issue, include `Closes #123` in the description so it's auto-closed on merge.
 2. **Test thoroughly.** Run the feature yourself. For skills, test on a fresh clone.
-3. **Check the right box** in the PR template. Labels are auto-applied based on your selection:
+3. **Boundary check.** Classify each changed file as **core**, **module**, or **instance** per [docs/HARNESS.md](docs/HARNESS.md). Instance content (channel IDs, project names, hostnames, host paths, personal dashboards, secrets) must not be in the diff. Run `npm run check:boundaries` and resolve any leaks it reports.
+4. **Check the right box** in the PR template. Labels are auto-applied based on your selection:
 
 | Checkbox | Label |
 |----------|-------|

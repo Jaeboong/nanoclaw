@@ -44,6 +44,10 @@ Four types of skills exist in NanoClaw. See [CONTRIBUTING.md](CONTRIBUTING.md) f
 | `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
 | `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
 
+## Boundary harness (read before editing)
+
+Every change belongs to one of three tiers: **core** / **module** / **instance**. Personal data (channel IDs, project names, hostnames, host paths, secrets) never goes to git. See [AGENTS.md](AGENTS.md) for shared agent rules and [docs/HARNESS.md](docs/HARNESS.md) for the full classification model and decision tree. Run `npm run check:boundaries` before committing.
+
 ## Contributing
 
 Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the four skill types and their guidelines, SKILL.md format rules, PR requirements, and the pre-submission checklist (searching for existing PRs/issues, testing, description format).

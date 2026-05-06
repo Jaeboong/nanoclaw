@@ -6,12 +6,20 @@ import {
 import { logger } from '../src/logger.js';
 import type { RegisteredGroup } from '../src/types.js';
 
-const jid = 'dc:1500673538129002606';
+const jid = process.argv[2] ?? process.env.MONITORING_JID ?? process.env.WEBHOOK_GRAFANA_JID;
+
+if (!jid) {
+  console.error(
+    'usage: tsx scripts/register-monitoring-group.ts <jid>\n' +
+      '  or set MONITORING_JID / WEBHOOK_GRAFANA_JID',
+  );
+  process.exit(1);
+}
 
 const group: RegisteredGroup = {
-  name: '두잇뚜 #로그',
-  folder: 'discord_main_log',
-  trigger: '@Andy',
+  name: process.env.MONITORING_GROUP_NAME ?? 'Monitoring Channel',
+  folder: process.env.MONITORING_GROUP_FOLDER ?? 'monitoring',
+  trigger: process.env.MONITORING_GROUP_TRIGGER ?? '@bot',
   added_at: new Date().toISOString(),
   requiresTrigger: false,
   isMain: true,

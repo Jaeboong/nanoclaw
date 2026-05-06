@@ -43,5 +43,12 @@ agents-sdk-docs
 # Personal completed-plan notes (per-installation context; channel IDs, project names)
 docs/plans/completed_plans/
 
+# Boundary harness — instance-tier directories under ops/ (see docs/HARNESS.md)
+ops/**/instances/
+ops/**/local/
+
+# Boundary harness — user-maintained leakage blocklist for npm run check:boundaries
+.boundaries-blocklist
+
 # Personal observability artifacts (project-specific dashboards, host overlays)
 ops/observability-host/grafana/dashboards/jasojeon-*.json
