@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenDartClient } from './client.js';
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe('OpenDartClient', () => {
   it('adds crtfc_key and returns JSON payloads', async () => {
@@ -27,5 +30,12 @@ describe('OpenDartClient', () => {
     });
     const client = new OpenDartClient({ apiKey: 'key', fetchImpl: fetchMock });
     await expect(client.companyInfo('00149293')).rejects.toThrow('013');
+  });
+
+  it('bypasses proxies for the OpenDART host', () => {
+    vi.stubEnv('NO_PROXY', 'localhost,127.0.0.1');
+    new OpenDartClient({ apiKey: 'key', fetchImpl: vi.fn() });
+    expect(process.env.NO_PROXY?.split(',')).toContain('opendart.fss.or.kr');
+    expect(process.env.NO_PROXY?.split(',')).toContain('localhost');
   });
 });

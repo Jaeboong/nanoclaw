@@ -74,6 +74,11 @@ vi.mock('discord.js', () => {
     DirectMessages: 8,
   };
 
+  const MessageType = {
+    Default: 0,
+    ChannelPinnedMessage: 6,
+  };
+
   class MockClient {
     eventHandlers = new Map<string, Handler[]>();
     user: any = { id: '999888777', tag: 'Andy#1234' };
@@ -174,6 +179,7 @@ vi.mock('discord.js', () => {
     Client: MockClient,
     Events,
     GatewayIntentBits,
+    MessageType,
     TextChannel,
     EmbedBuilder,
     AttachmentBuilder,

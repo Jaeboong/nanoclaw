@@ -4,6 +4,16 @@ import type {
   ListFilingsInput,
 } from './types.js';
 
+function appendNoProxyHost(hostname: string): void {
+  const raw = process.env.NO_PROXY || process.env.no_proxy || '';
+  const hosts = raw
+    .split(',')
+    .map((host) => host.trim())
+    .filter(Boolean);
+  if (!hosts.includes(hostname)) hosts.push(hostname);
+  process.env.NO_PROXY = hosts.join(',');
+}
+
 export class DartApiError extends Error {
   constructor(
     public readonly status: string,
@@ -20,6 +30,7 @@ export class OpenDartClient {
   constructor(private readonly options: DartClientOptions) {
     if (!options.apiKey) throw new Error('DART_API_KEY is required');
     this.baseUrl = options.baseUrl ?? 'https://opendart.fss.or.kr/api';
+    appendNoProxyHost(new URL(this.baseUrl).hostname);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
