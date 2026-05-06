@@ -71,6 +71,9 @@ COPY agent-runner/ ./
 # Build TypeScript
 RUN npm run build
 
+RUN printf '#!/bin/sh\nexec node /app/dist/dart-cli.js "$@"\n' > /usr/local/bin/dart-tool \
+    && chmod +x /usr/local/bin/dart-tool
+
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
