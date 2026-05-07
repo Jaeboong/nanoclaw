@@ -30,6 +30,9 @@ function store(overrides: {
   content: string;
   timestamp: string;
   is_from_me?: boolean;
+  is_bot_message?: boolean;
+  mentioned_bot_ids?: string[];
+  mentions_self?: boolean;
 }) {
   storeMessage({
     id: overrides.id,
@@ -39,6 +42,9 @@ function store(overrides: {
     content: overrides.content,
     timestamp: overrides.timestamp,
     is_from_me: overrides.is_from_me ?? false,
+    is_bot_message: overrides.is_bot_message ?? false,
+    mentioned_bot_ids: overrides.mentioned_bot_ids,
+    mentions_self: overrides.mentions_self,
   });
 }
 
@@ -89,6 +95,45 @@ describe('storeMessage', () => {
     expect(messages).toHaveLength(0);
   });
 
+  it('can include bot messages for cross-agent context without changing the default', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'user-msg',
+      chat_jid: 'group@g.us',
+      sender: 'user-1',
+      sender_name: 'Alice',
+      content: 'question',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+    store({
+      id: 'bot-msg',
+      chat_jid: 'group@g.us',
+      sender: 'bot-1',
+      sender_name: 'Codex',
+      content: 'answer',
+      timestamp: '2024-01-01T00:00:02.000Z',
+      is_bot_message: true,
+    });
+
+    const defaultMessages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(defaultMessages.map((m) => m.id)).toEqual(['user-msg']);
+
+    const contextMessages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+      200,
+      { includeBotMessages: true },
+    );
+    expect(contextMessages.map((m) => m.id)).toEqual(['user-msg', 'bot-msg']);
+    expect(contextMessages[1].is_bot_message).toBe(true);
+  });
+
   it('stores is_from_me flag', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
 
@@ -109,6 +154,30 @@ describe('storeMessage', () => {
       'Andy',
     );
     expect(messages).toHaveLength(1);
+  });
+
+  it('persists Discord mention metadata through getMessagesSince', () => {
+    storeChatMetadata('dc:channel-1', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'discord-mention',
+      chat_jid: 'dc:channel-1',
+      sender: 'user-1',
+      sender_name: 'Alice',
+      content: '<@222333444> hello',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      mentioned_bot_ids: ['222333444'],
+      mentions_self: false,
+    });
+
+    const messages = getMessagesSince(
+      'dc:channel-1',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].mentioned_bot_ids).toEqual(['222333444']);
+    expect(messages[0].mentions_self).toBe(false);
   });
 
   it('upserts on duplicate id+chat_jid', () => {
@@ -219,6 +288,30 @@ describe('reply context', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0].reply_to_message_id).toBe('99');
     expect(messages[0].reply_to_sender_name).toBe('Dave');
+  });
+
+  it('retrieves Discord mention metadata via getNewMessages', () => {
+    storeChatMetadata('dc:channel-1', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'discord-self-mention',
+      chat_jid: 'dc:channel-1',
+      sender: 'user-1',
+      sender_name: 'Alice',
+      content: '<@999888777> hello',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      mentioned_bot_ids: ['999888777'],
+      mentions_self: true,
+    });
+
+    const { messages } = getNewMessages(
+      ['dc:channel-1'],
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].mentioned_bot_ids).toEqual(['999888777']);
+    expect(messages[0].mentions_self).toBe(true);
   });
 });
 

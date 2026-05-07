@@ -15,6 +15,42 @@ import {
 
 let db: Database.Database;
 
+type MessageRow = Omit<
+  NewMessage,
+  'is_from_me' | 'is_bot_message' | 'mentioned_bot_ids' | 'mentions_self'
+> & {
+  is_from_me?: boolean | number | null;
+  is_bot_message?: boolean | number | null;
+  mentioned_bot_ids?: string | null;
+  mentions_self?: boolean | number | null;
+};
+
+function parseMentionedBotIds(
+  value: string | null | undefined,
+): string[] | undefined {
+  if (value === null || value === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.filter((id): id is string => typeof id === 'string');
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeMessageRow(row: MessageRow): NewMessage {
+  return {
+    ...row,
+    is_from_me: row.is_from_me === true || row.is_from_me === 1,
+    is_bot_message: row.is_bot_message === true || row.is_bot_message === 1,
+    mentioned_bot_ids: parseMentionedBotIds(row.mentioned_bot_ids),
+    mentions_self:
+      row.mentions_self === null || row.mentions_self === undefined
+        ? undefined
+        : row.mentions_self === true || row.mentions_self === 1,
+  };
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -33,6 +69,8 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      mentioned_bot_ids TEXT,
+      mentions_self INTEGER,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -169,6 +207,18 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add Discord mention metadata columns if they don't exist (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN mentioned_bot_ids TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN mentions_self INTEGER`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -297,7 +347,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, mentioned_bot_ids, mentions_self, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -307,6 +357,8 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.mentioned_bot_ids ? JSON.stringify(msg.mentioned_bot_ids) : null,
+    msg.mentions_self === undefined ? null : msg.mentions_self ? 1 : 0,
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
@@ -355,6 +407,7 @@ export function getNewMessages(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
+             is_bot_message, mentioned_bot_ids, mentions_self,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
@@ -367,14 +420,14 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as MessageRow[];
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
     if (row.timestamp > newTimestamp) newTimestamp = row.timestamp;
   }
 
-  return { messages: rows, newTimestamp };
+  return { messages: rows.map(normalizeMessageRow), newTimestamp };
 }
 
 export function getMessagesSince(
@@ -382,25 +435,31 @@ export function getMessagesSince(
   sinceTimestamp: string,
   botPrefix: string,
   limit: number = 200,
+  options: { includeBotMessages?: boolean } = {},
 ): NewMessage[] {
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   // Subquery takes the N most recent, outer query re-sorts chronologically.
+  const botMessageFilter = options.includeBotMessages
+    ? ''
+    : 'AND is_bot_message = 0';
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
+             is_bot_message, mentioned_bot_ids, mentions_self,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        ${botMessageFilter} AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db
+  const rows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as MessageRow[];
+  return rows.map(normalizeMessageRow);
 }
 
 export function getLastBotMessageTimestamp(

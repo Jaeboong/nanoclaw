@@ -52,6 +52,8 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  mentioned_bot_ids?: string[];
+  mentions_self?: boolean;
   thread_id?: string;
   reply_to_message_id?: string;
   reply_to_message_content?: string;
