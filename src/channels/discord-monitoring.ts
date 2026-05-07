@@ -2,6 +2,7 @@ import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 
 import { createGrafanaSummaryFeature } from './discord-features/grafana-summary.js';
+import { responderFeature } from './discord-features/responder.js';
 import { runtimeControlFeature } from './discord-features/runtime-control.js';
 import { DiscordChannel } from './discord.js';
 import { ChannelOpts, registerChannel } from './registry.js';
@@ -32,7 +33,11 @@ registerChannel('discord-monitoring', (opts: ChannelOpts) => {
   return new DiscordChannel(
     token,
     opts,
-    [runtimeControlFeature, createGrafanaSummaryFeature({ grafanaJid })],
+    [
+      runtimeControlFeature,
+      responderFeature,
+      createGrafanaSummaryFeature({ grafanaJid }),
+    ],
     {
       exactJids: [grafanaJid],
       name: 'discord-monitoring',

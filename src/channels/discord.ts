@@ -26,6 +26,7 @@ import {
   createJiraFeature,
   type JiraFeature,
 } from './discord-features/jira.js';
+import { responderFeature } from './discord-features/responder.js';
 import { runtimeControlFeature } from './discord-features/runtime-control.js';
 import { buildEmbedsForMessage } from './discord-sections.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -594,7 +595,7 @@ registerChannel('discord', (opts: ChannelOpts) => {
     envVars.DISCORD_JIRA_PANEL_CHANNEL_ID ||
     '';
 
-  const features: DiscordFeature[] = [runtimeControlFeature];
+  const features: DiscordFeature[] = [runtimeControlFeature, responderFeature];
   if (panelChannelId) {
     features.push(createJiraFeature({ panelChannelId }));
   } else {
