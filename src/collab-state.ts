@@ -318,6 +318,28 @@ export function parseCollabTurnStatus(text: string): CollabTurnStatus {
   return 'CONTINUE';
 }
 
+export function hasExplicitCollabTurnStatus(text: string): boolean {
+  if (
+    /^\s*(?:COLLAB_STATUS|STATUS)\s*[:=-]\s*(DONE|CONTINUE|NEEDS_USER|BLOCKED)\b/im.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  const lastLine = text
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  return (
+    lastLine === 'DONE' ||
+    lastLine === 'CONTINUE' ||
+    lastLine === 'NEEDS_USER' ||
+    lastLine === 'BLOCKED'
+  );
+}
+
 export function recordCollabAgentTurn(
   chatJid: string,
   agent: CollabAgent,
@@ -388,6 +410,13 @@ export function isCollabTurnForAgent(
   filePath?: string,
 ): boolean {
   return getActiveCollabSession(chatJid, filePath)?.nextAgent === agent;
+}
+
+export function shouldIncludeBotMessagesForCollabRecovery(
+  chatJid: string,
+  filePath?: string,
+): boolean {
+  return getActiveCollabSession(chatJid, filePath)?.nextAgent === 'claude';
 }
 
 export function buildCollabTurnPrompt(params: {

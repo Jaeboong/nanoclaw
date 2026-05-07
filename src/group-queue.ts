@@ -84,6 +84,9 @@ export class GroupQueue {
 
     if (state.active) {
       state.pendingMessages = true;
+      if (state.idleWaiting) {
+        this.closeStdin(groupJid);
+      }
       logger.debug({ groupJid }, 'Container active, message queued');
       return;
     }

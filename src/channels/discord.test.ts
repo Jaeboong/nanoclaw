@@ -63,6 +63,7 @@ const clientRef = vi.hoisted(() => ({ current: null as any }));
 vi.mock('discord.js', () => {
   const Events = {
     MessageCreate: 'messageCreate',
+    MessageUpdate: 'messageUpdate',
     ClientReady: 'ready',
     Error: 'error',
   };
@@ -221,6 +222,8 @@ function createMessage(overrides: {
   messageId?: string;
   createdAt?: Date;
   attachments?: Map<string, any>;
+  embeds?: any[];
+  editedAt?: Date | null;
   reference?: { messageId?: string };
   mentionsBotId?: boolean;
   mentionedOtherBotIds?: string[];
@@ -242,6 +245,7 @@ function createMessage(overrides: {
     id: overrides.messageId ?? 'msg_001',
     content: overrides.content ?? 'Hello everyone',
     createdAt: overrides.createdAt ?? new Date('2024-01-01T00:00:00.000Z'),
+    editedAt: overrides.editedAt ?? null,
     author: {
       id: authorId,
       username: overrides.authorUsername ?? 'alice',
@@ -265,6 +269,7 @@ function createMessage(overrides: {
       users: mentionsMap,
     },
     attachments: overrides.attachments ?? new Map(),
+    embeds: overrides.embeds ?? [],
     reference: overrides.reference ?? null,
   };
 }
@@ -276,6 +281,11 @@ function currentClient() {
 async function triggerMessage(message: any) {
   const handlers = currentClient().eventHandlers.get('messageCreate') || [];
   for (const h of handlers) await h(message);
+}
+
+async function triggerMessageUpdate(message: any) {
+  const handlers = currentClient().eventHandlers.get('messageUpdate') || [];
+  for (const h of handlers) await h({}, message);
 }
 
 // --- Tests ---
@@ -441,6 +451,63 @@ describe('DiscordChannel', () => {
         'dc:1234567890123456',
         expect.objectContaining({
           content: 'I am a bot',
+          is_bot_message: true,
+        }),
+      );
+    });
+
+    it('uses embed text when a bot message has no plain content', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts, []);
+      await channel.connect();
+
+      const msg = createMessage({
+        isBot: true,
+        content: '',
+        embeds: [
+          {
+            title: '📌 결론',
+            description: '본문\nCOLLAB_STATUS: CONTINUE',
+            fields: [{ name: '근거', value: '필드 내용' }],
+          },
+        ],
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content: '📌 결론\n본문\nCOLLAB_STATUS: CONTINUE\n근거\n필드 내용',
+          is_bot_message: true,
+        }),
+      );
+    });
+
+    it('stores edited bot message content from message updates', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts, []);
+      await channel.connect();
+
+      const msg = createMessage({
+        isBot: true,
+        content: '',
+        messageId: 'bot_msg_1',
+        createdAt: new Date('2024-01-01T00:00:00.000Z'),
+        editedAt: new Date('2024-01-01T00:00:05.000Z'),
+        embeds: [
+          {
+            description: '최종 답변\nCOLLAB_STATUS: CONTINUE',
+          },
+        ],
+      });
+      await triggerMessageUpdate(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          id: 'bot_msg_1',
+          content: '최종 답변\nCOLLAB_STATUS: CONTINUE',
+          timestamp: '2024-01-01T00:00:05.000Z',
           is_bot_message: true,
         }),
       );

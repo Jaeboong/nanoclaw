@@ -7,9 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildCollabTurnPrompt,
   getCollabMaxRounds,
+  hasExplicitCollabTurnStatus,
   parseCollabTextCommand,
   recordCollabAgentTurn,
   setCollabMaxRounds,
+  shouldIncludeBotMessagesForCollabRecovery,
   startCollabSession,
   stopCollabSession,
 } from './collab-state.js';
@@ -140,6 +142,59 @@ describe('collab state', () => {
     expect(prompt).toContain('round 2/10');
     expect(prompt).toContain('COLLAB_STATUS: DONE|CONTINUE|NEEDS_USER|BLOCKED');
     expect(prompt).toContain('재붕봇: 원인 후보 정리');
+  });
+
+  it('detects explicit collab turn status lines', () => {
+    expect(hasExplicitCollabTurnStatus('작업함\nCOLLAB_STATUS: CONTINUE')).toBe(
+      true,
+    );
+    expect(hasExplicitCollabTurnStatus('작업함\nDONE')).toBe(true);
+    expect(hasExplicitCollabTurnStatus('Tidepooling...')).toBe(false);
+    expect(hasExplicitCollabTurnStatus('일반적인 done 단어')).toBe(false);
+  });
+
+  it('includes bot messages during recovery only for an active Claude turn', () => {
+    startCollabSession(
+      {
+        chatJid: 'dc:channel',
+        task: 'handoff 복구',
+        starter: 'claude',
+        startedBy: 'user-1',
+      },
+      statePath,
+    );
+
+    expect(
+      shouldIncludeBotMessagesForCollabRecovery('dc:channel', statePath),
+    ).toBe(true);
+
+    recordCollabAgentTurn(
+      'dc:channel',
+      'claude',
+      '초안\nCOLLAB_STATUS: CONTINUE',
+      statePath,
+    );
+
+    expect(
+      shouldIncludeBotMessagesForCollabRecovery('dc:channel', statePath),
+    ).toBe(false);
+
+    recordCollabAgentTurn(
+      'dc:channel',
+      'codex',
+      '검토\nCOLLAB_STATUS: CONTINUE',
+      statePath,
+    );
+
+    expect(
+      shouldIncludeBotMessagesForCollabRecovery('dc:channel', statePath),
+    ).toBe(true);
+
+    stopCollabSession('dc:channel', 'user-1', statePath);
+
+    expect(
+      shouldIncludeBotMessagesForCollabRecovery('dc:channel', statePath),
+    ).toBe(false);
   });
 });
 

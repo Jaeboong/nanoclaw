@@ -51,6 +51,47 @@ export interface DiscordChannelConfig {
   name?: string;
 }
 
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function extractEmbedText(embeds: readonly unknown[] | undefined): string {
+  const parts: string[] = [];
+  for (const embed of embeds ?? []) {
+    if (!embed || typeof embed !== 'object') continue;
+    const record = embed as {
+      title?: unknown;
+      description?: unknown;
+      fields?: unknown;
+      footer?: { text?: unknown } | null;
+    };
+    const title = readOptionalString(record.title);
+    const description = readOptionalString(record.description);
+    if (title) parts.push(title);
+    if (description) parts.push(description);
+    if (Array.isArray(record.fields)) {
+      for (const field of record.fields) {
+        if (!field || typeof field !== 'object') continue;
+        const fieldRecord = field as { name?: unknown; value?: unknown };
+        const name = readOptionalString(fieldRecord.name);
+        const value = readOptionalString(fieldRecord.value);
+        if (name) parts.push(name);
+        if (value) parts.push(value);
+      }
+    }
+    const footer = readOptionalString(record.footer?.text);
+    if (footer) parts.push(footer);
+  }
+  return parts.join('\n');
+}
+
+function combineMessageContentAndEmbeds(message: Message): string {
+  const content = message.content?.trim() ?? '';
+  const embedText = extractEmbedText(message.embeds);
+  if (content && embedText) return `${content}\n${embedText}`;
+  return content || embedText;
+}
+
 export class DiscordChannel implements Channel {
   name: string;
 
@@ -101,7 +142,10 @@ export class DiscordChannel implements Channel {
       ],
     });
 
-    this.client.on(Events.MessageCreate, async (message: Message) => {
+    const handleIncomingMessage = async (
+      message: Message,
+      isUpdate = false,
+    ) => {
       // Auto-delete the system "X pinned a message" notification when WE pin.
       // Eliminates pin-spam in the work-ledger panel channel after every refresh.
       if (
@@ -126,8 +170,11 @@ export class DiscordChannel implements Channel {
       if (!this.ownsJid(chatJid)) {
         return;
       }
-      let content = message.content;
-      const timestamp = message.createdAt.toISOString();
+      let content = combineMessageContentAndEmbeds(message);
+      const timestamp =
+        isUpdate && message.editedAt
+          ? message.editedAt.toISOString()
+          : message.createdAt.toISOString();
       const senderName =
         message.member?.displayName ||
         message.author.displayName ||
@@ -265,7 +312,18 @@ export class DiscordChannel implements Channel {
           );
         }
       }
+    };
+
+    this.client.on(Events.MessageCreate, async (message: Message) => {
+      await handleIncomingMessage(message);
     });
+
+    this.client.on(
+      Events.MessageUpdate,
+      async (_oldMessage, message) => {
+        await handleIncomingMessage(message as Message, true);
+      },
+    );
 
     this.client.on(Events.Error, (err) => {
       logger.error({ err: err.message }, 'Discord client error');

@@ -70,7 +70,9 @@ import {
 import {
   buildCollabTurnPrompt,
   getActiveCollabSession,
+  hasExplicitCollabTurnStatus,
   recordCollabAgentTurn,
+  shouldIncludeBotMessagesForCollabRecovery,
 } from './collab-state.js';
 import {
   hasAuthorizedTrigger,
@@ -176,6 +178,7 @@ function recordCodexCollabTurnIfNeeded(chatJid: string, msg: NewMessage): void {
   if (!msg.is_bot_message) return;
   const session = getActiveCollabSession(chatJid);
   if (!session || session.nextAgent !== 'codex') return;
+  if (!hasExplicitCollabTurnStatus(msg.content)) return;
   const result = recordCollabAgentTurn(chatJid, 'codex', msg.content);
   logger.info(
     {
@@ -761,15 +764,18 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
+    const includeBotMessages =
+      shouldIncludeBotMessagesForCollabRecovery(chatJid);
     const pending = getMessagesSince(
       chatJid,
       getOrRecoverCursor(chatJid),
       ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
+      { includeBotMessages },
     );
     if (pending.length > 0) {
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        { group: group.name, pendingCount: pending.length, includeBotMessages },
         'Recovery: found unprocessed messages',
       );
       queue.enqueueMessageCheck(chatJid);
