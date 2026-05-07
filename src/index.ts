@@ -63,6 +63,15 @@ import {
   stopRemoteControl,
 } from './remote-control.js';
 import {
+  getResponder,
+  parseResponderCommand,
+  setResponder,
+} from './responder-state.js';
+import {
+  hasAuthorizedTrigger,
+  shouldProcessForResponder,
+} from './responder-routing.js';
+import {
   isSenderAllowed,
   isTriggerAllowed,
   loadSenderAllowlist,
@@ -258,14 +267,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     getOrRecoverCursor(chatJid),
     ASSISTANT_NAME,
     MAX_MESSAGES_PER_PROMPT,
+    { includeBotMessages: true },
   );
 
   if (missedMessages.length === 0) return true;
+  const interactiveMessages = missedMessages.filter((m) => !m.is_bot_message);
+  if (interactiveMessages.length === 0) return true;
+  const routingMessages = [
+    interactiveMessages[interactiveMessages.length - 1],
+  ].filter((m): m is NewMessage => m !== undefined);
 
   // --- Session command interception (before trigger check) ---
   const groupTriggerPattern = getTriggerPattern(group.trigger);
+  const allowlistCfg = loadSenderAllowlist();
   const cmdResult = await handleSessionCommand({
-    missedMessages,
+    missedMessages: interactiveMessages,
     isMainGroup,
     groupName: group.name,
     triggerPattern: groupTriggerPattern,
@@ -290,7 +306,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           !reqTrigger ||
           (hasTrigger &&
             (msg.is_from_me ||
-              isTriggerAllowed(chatJid, msg.sender, loadSenderAllowlist())))
+              isTriggerAllowed(chatJid, msg.sender, allowlistCfg)))
         );
       },
     },
@@ -298,16 +314,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (cmdResult.handled) return cmdResult.success;
   // --- End session command interception ---
 
+  if (
+    !shouldProcessForResponder({
+      responder: getResponder(chatJid),
+      chatJid,
+      messages: routingMessages,
+      triggerPattern: groupTriggerPattern,
+      allowlist: allowlistCfg,
+    })
+  ) {
+    return true;
+  }
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const triggerPattern = getTriggerPattern(group.trigger);
-    const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) {
+    if (
+      !hasAuthorizedTrigger({
+        chatJid,
+        messages: interactiveMessages,
+        triggerPattern: groupTriggerPattern,
+        allowlist: allowlistCfg,
+      })
+    ) {
       return true;
     }
   }
@@ -576,21 +604,35 @@ async function startMessageLoop(): Promise<void> {
           }
           // --- End session command interception ---
 
+          const allowlistCfg = loadSenderAllowlist();
+          if (
+            !shouldProcessForResponder({
+              responder: getResponder(chatJid),
+              chatJid,
+              messages: groupMessages,
+              triggerPattern: loopTriggerPattern,
+              allowlist: allowlistCfg,
+            })
+          ) {
+            continue;
+          }
+
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const triggerPattern = getTriggerPattern(group.trigger);
-            const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) continue;
+            if (
+              !hasAuthorizedTrigger({
+                chatJid,
+                messages: groupMessages,
+                triggerPattern: loopTriggerPattern,
+                allowlist: allowlistCfg,
+              })
+            ) {
+              continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
@@ -600,6 +642,7 @@ async function startMessageLoop(): Promise<void> {
             getOrRecoverCursor(chatJid),
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
+            { includeBotMessages: true },
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
@@ -725,6 +768,56 @@ async function main(): Promise<void> {
     }
   }
 
+  async function handleResponderControl(
+    chatJid: string,
+    msg: NewMessage,
+  ): Promise<void> {
+    const command = parseResponderCommand(msg.content);
+    if (!command) return;
+
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    if (!registeredGroups[chatJid]) {
+      await channel.sendMessage(
+        chatJid,
+        'Responder command ignored: unregistered channel.',
+      );
+      return;
+    }
+
+    const allowlistCfg = loadSenderAllowlist();
+    if (
+      !msg.is_from_me &&
+      !isSenderAllowed(chatJid, msg.sender, allowlistCfg)
+    ) {
+      await channel.sendMessage(chatJid, 'Responder command denied.');
+      return;
+    }
+
+    if (command.type === 'status') {
+      await channel.sendMessage(
+        chatJid,
+        `Current responder: ${getResponder(chatJid)}`,
+      );
+      return;
+    }
+
+    if (command.type === 'invalid') {
+      await channel.sendMessage(
+        chatJid,
+        'Usage: /responder [claude|codex|both]',
+      );
+      return;
+    }
+
+    setResponder(chatJid, command.responder, msg.sender);
+    await channel.sendMessage(
+      chatJid,
+      `Responder changed to: ${command.responder}`,
+    );
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
@@ -733,6 +826,13 @@ async function main(): Promise<void> {
       if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
         handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
           logger.error({ err, chatJid }, 'Remote control command error'),
+        );
+        return;
+      }
+
+      if (parseResponderCommand(trimmed)) {
+        handleResponderControl(chatJid, { ...msg, content: trimmed }).catch(
+          (err) => logger.error({ err, chatJid }, 'Responder command error'),
         );
         return;
       }
