@@ -71,7 +71,7 @@
 ### Task 5: Runtime Wiring and Verification
 
 **Files:**
-- Modify: `/home/ubuntu/openclaw/docker-compose.local.yml`
+- Modify: `../openclaw/docker-compose.local.yml`
 - Modify: docs as needed
 
 **Steps:**
