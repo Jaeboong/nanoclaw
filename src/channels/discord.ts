@@ -22,6 +22,7 @@ import type {
   DiscordFeature,
   DiscordFeatureContext,
 } from './discord-features/feature.js';
+import { collabFeature } from './discord-features/collab.js';
 import {
   createJiraFeature,
   type JiraFeature,
@@ -595,7 +596,11 @@ registerChannel('discord', (opts: ChannelOpts) => {
     envVars.DISCORD_JIRA_PANEL_CHANNEL_ID ||
     '';
 
-  const features: DiscordFeature[] = [runtimeControlFeature, responderFeature];
+  const features: DiscordFeature[] = [
+    runtimeControlFeature,
+    responderFeature,
+    collabFeature,
+  ];
   if (panelChannelId) {
     features.push(createJiraFeature({ panelChannelId }));
   } else {

@@ -159,7 +159,9 @@ describe('collab text commands', () => {
       type: 'max',
       maxRounds: 5,
     });
-    expect(parseCollabTextCommand('/collab status')).toEqual({ type: 'status' });
+    expect(parseCollabTextCommand('/collab status')).toEqual({
+      type: 'status',
+    });
     expect(parseCollabTextCommand('/collab stop')).toEqual({ type: 'stop' });
     expect(parseCollabTextCommand('/not-collab')).toBeNull();
   });

@@ -1,6 +1,7 @@
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 
+import { collabFeature } from './discord-features/collab.js';
 import { createGrafanaSummaryFeature } from './discord-features/grafana-summary.js';
 import { responderFeature } from './discord-features/responder.js';
 import { runtimeControlFeature } from './discord-features/runtime-control.js';
@@ -36,6 +37,7 @@ registerChannel('discord-monitoring', (opts: ChannelOpts) => {
     [
       runtimeControlFeature,
       responderFeature,
+      collabFeature,
       createGrafanaSummaryFeature({ grafanaJid }),
     ],
     {

@@ -5,11 +5,7 @@ import { randomUUID } from 'crypto';
 import { COLLAB_STATE_PATH } from './config.js';
 
 export type CollabAgent = 'claude' | 'codex';
-export type CollabTurnStatus =
-  | 'DONE'
-  | 'CONTINUE'
-  | 'NEEDS_USER'
-  | 'BLOCKED';
+export type CollabTurnStatus = 'DONE' | 'CONTINUE' | 'NEEDS_USER' | 'BLOCKED';
 export type CollabSessionStatus =
   | 'active'
   | 'complete'
@@ -44,7 +40,11 @@ export interface CollabState {
 }
 
 export type CollabTextCommand =
-  | { readonly type: 'start'; readonly starter: CollabAgent; readonly task: string }
+  | {
+      readonly type: 'start';
+      readonly starter: CollabAgent;
+      readonly task: string;
+    }
   | { readonly type: 'max'; readonly maxRounds: number }
   | { readonly type: 'status' }
   | { readonly type: 'stop' }
@@ -84,10 +84,7 @@ function otherAgent(agent: CollabAgent): CollabAgent {
 
 function normalizeMaxRounds(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_MAX_ROUNDS;
-  return Math.min(
-    HARD_MAX_ROUNDS,
-    Math.max(MIN_MAX_ROUNDS, Math.floor(value)),
-  );
+  return Math.min(HARD_MAX_ROUNDS, Math.max(MIN_MAX_ROUNDS, Math.floor(value)));
 }
 
 function statePath(filePath?: string): string {
@@ -119,7 +116,9 @@ function normalizeSession(value: unknown): CollabSession | undefined {
     starter: value.starter,
     nextAgent: value.nextAgent,
     maxRounds: normalizeMaxRounds(
-      typeof value.maxRounds === 'number' ? value.maxRounds : DEFAULT_MAX_ROUNDS,
+      typeof value.maxRounds === 'number'
+        ? value.maxRounds
+        : DEFAULT_MAX_ROUNDS,
     ),
     round: Math.max(0, Math.floor(Number(value.round) || 0)),
     done: {
@@ -127,7 +126,8 @@ function normalizeSession(value: unknown): CollabSession | undefined {
       codex: doneValue.codex === true,
     },
     status,
-    startedBy: typeof value.startedBy === 'string' ? value.startedBy : 'unknown',
+    startedBy:
+      typeof value.startedBy === 'string' ? value.startedBy : 'unknown',
     startedAt: typeof value.startedAt === 'string' ? value.startedAt : nowIso(),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : nowIso(),
     ...(value.lastStatus === 'DONE' ||
@@ -163,7 +163,9 @@ function normalizeState(raw: unknown): CollabState {
 
 export function readCollabState(filePath?: string): CollabState {
   try {
-    return normalizeState(JSON.parse(fs.readFileSync(statePath(filePath), 'utf8')));
+    return normalizeState(
+      JSON.parse(fs.readFileSync(statePath(filePath), 'utf8')),
+    );
   } catch {
     return emptyState();
   }
@@ -210,10 +212,7 @@ export function getActiveCollabSession(
   return session?.status === 'active' ? session : undefined;
 }
 
-export function getCollabMaxRounds(
-  chatJid: string,
-  filePath?: string,
-): number {
+export function getCollabMaxRounds(chatJid: string, filePath?: string): number {
   return (
     readCollabState(filePath).channels[chatJid]?.defaultMaxRounds ??
     DEFAULT_MAX_ROUNDS
@@ -375,7 +374,11 @@ export function recordCollabAgentTurn(
     ...(endedReason ? { endedReason } : {}),
   };
 
-  updateChannel(chatJid, (channel) => ({ ...channel, session: updated }), filePath);
+  updateChannel(
+    chatJid,
+    (channel) => ({ ...channel, session: updated }),
+    filePath,
+  );
   return { session: updated, reason };
 }
 
@@ -394,7 +397,8 @@ export function buildCollabTurnPrompt(params: {
   readonly maxRounds: number;
   readonly conversation: string;
 }): string {
-  const agentLabel = params.agent === 'claude' ? '재붕봇(Claude)' : '나붕봇(Codex)';
+  const agentLabel =
+    params.agent === 'claude' ? '재붕봇(Claude)' : '나붕봇(Codex)';
   return [
     '[COLLAB SESSION]',
     `You are ${agentLabel}.`,
