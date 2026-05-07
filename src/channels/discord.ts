@@ -318,12 +318,9 @@ export class DiscordChannel implements Channel {
       await handleIncomingMessage(message);
     });
 
-    this.client.on(
-      Events.MessageUpdate,
-      async (_oldMessage, message) => {
-        await handleIncomingMessage(message as Message, true);
-      },
-    );
+    this.client.on(Events.MessageUpdate, async (_oldMessage, message) => {
+      await handleIncomingMessage(message as Message, true);
+    });
 
     this.client.on(Events.Error, (err) => {
       logger.error({ err: err.message }, 'Discord client error');
