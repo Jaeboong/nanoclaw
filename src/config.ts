@@ -49,6 +49,9 @@ export const RESPONDER_STATE_PATH = path.join(
   'nanoclaw',
   'responder-state.json',
 );
+export const COLLAB_STATE_PATH =
+  process.env.NANOCLAW_COLLAB_STATE_PATH ||
+  path.join(HOME_DIR, '.config', 'nanoclaw', 'collab-state.json');
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
