@@ -7,11 +7,7 @@ import {
 
 import {
   buildCollabKickoffMessage,
-  getCollabMaxRounds,
-  getCollabSession,
-  setCollabMaxRounds,
   startCollabSession,
-  stopCollabSession,
   type CollabAgent,
 } from '../../collab-state.js';
 import {
@@ -50,8 +46,8 @@ type HandlerOptions = {
 };
 
 const AGENT_CHOICES: readonly { name: string; value: CollabAgent }[] = [
-  { name: '재붕봇 / Claude', value: 'claude' },
-  { name: '나붕봇 / Codex', value: 'codex' },
+  { name: 'Codex', value: 'codex' },
+  { name: 'Claude', value: 'claude' },
 ];
 
 function isCollabAgent(value: string | null): value is CollabAgent {
@@ -62,61 +58,30 @@ function slashCommands(): SlashCommandJSON[] {
   return [
     new SlashCommandBuilder()
       .setName('collab')
-      .setDescription('Start or control a bounded Claude/Codex collaboration')
-      .addStringOption((opt) =>
-        opt
-          .setName('mode')
-          .setDescription('Control mode; omit to start when task is present')
-          .setRequired(false)
-          .addChoices(
-            { name: 'start', value: 'start' },
-            { name: 'max', value: 'max' },
-            { name: 'status', value: 'status' },
-            { name: 'stop', value: 'stop' },
-          ),
-      )
-      .addStringOption((opt) =>
-        opt
-          .setName('agent')
-          .setDescription('Starting agent; default is 재붕봇')
-          .setRequired(false)
-          .addChoices(...AGENT_CHOICES),
-      )
+      .setDescription('Start a bounded Claude/Codex collaboration')
       .addStringOption((opt) =>
         opt
           .setName('task')
           .setDescription('Natural language task for the collaboration')
-          .setRequired(false),
+          .setRequired(true),
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('start')
+          .setDescription('Starting agent; default is Claude')
+          .setRequired(false)
+          .addChoices(...AGENT_CHOICES),
       )
       .addIntegerOption((opt) =>
         opt
-          .setName('value')
-          .setDescription('Value for mode=max')
+          .setName('max')
+          .setDescription('Max rounds for this collaboration')
           .setRequired(false)
           .setMinValue(1)
           .setMaxValue(50),
       )
       .toJSON(),
   ];
-}
-
-function formatStatus(chatJid: string, statePath?: string): string {
-  const session = getCollabSession(chatJid, statePath);
-  const maxRounds = getCollabMaxRounds(chatJid, statePath);
-  if (!session) {
-    return `Collab inactive. Default max rounds: ${maxRounds}`;
-  }
-  return [
-    `Collab status: ${session.status}`,
-    `Task: ${session.task}`,
-    `Next: ${session.nextAgent}`,
-    `Rounds: ${session.round}/${session.maxRounds}`,
-    `Done: claude=${session.done.claude}, codex=${session.done.codex}`,
-  ].join('\n');
-}
-
-function isStartMode(mode: string | null): boolean {
-  return mode === null || mode === 'start';
 }
 
 function agentDisplayName(agent: CollabAgent): string {
@@ -155,59 +120,7 @@ export async function handleCollabInteraction(
     return true;
   }
 
-  const mode = interaction.options.getString('mode');
   const task = interaction.options.getString('task')?.trim() ?? '';
-  if (mode === 'status' || (mode === null && !task)) {
-    await interaction.reply({
-      content: formatStatus(chatJid, options.statePath),
-      flags: MessageFlags.Ephemeral,
-    });
-    return true;
-  }
-
-  if (mode === 'stop') {
-    const stopped = stopCollabSession(
-      chatJid,
-      interaction.user.id,
-      options.statePath,
-    );
-    await interaction.reply({
-      content: stopped ? 'Collab stopped.' : 'Collab is not active.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return true;
-  }
-
-  if (mode === 'max') {
-    const value = interaction.options.getInteger('value');
-    if (value === null) {
-      await interaction.reply({
-        content: 'Usage: /collab mode:max value:<rounds>',
-        flags: MessageFlags.Ephemeral,
-      });
-      return true;
-    }
-    const maxRounds = setCollabMaxRounds(
-      chatJid,
-      value,
-      interaction.user.id,
-      options.statePath,
-    );
-    await interaction.reply({
-      content: `Collab max rounds changed to: ${maxRounds}`,
-      flags: MessageFlags.Ephemeral,
-    });
-    return true;
-  }
-
-  if (!isStartMode(mode)) {
-    await interaction.reply({
-      content: 'Usage: /collab [agent] task:<natural language task>',
-      flags: MessageFlags.Ephemeral,
-    });
-    return true;
-  }
-
   if (!task) {
     await interaction.reply({
       content: 'Usage: /collab task:<natural language task>',
@@ -216,14 +129,16 @@ export async function handleCollabInteraction(
     return true;
   }
 
-  const requestedAgent = interaction.options.getString('agent');
+  const requestedAgent = interaction.options.getString('start');
   const starter = isCollabAgent(requestedAgent) ? requestedAgent : 'claude';
+  const requestedMaxRounds = interaction.options.getInteger('max');
   const session = startCollabSession(
     {
       chatJid,
       task,
       starter,
       startedBy: interaction.user.id,
+      ...(requestedMaxRounds !== null ? { maxRounds: requestedMaxRounds } : {}),
     },
     options.statePath,
   );

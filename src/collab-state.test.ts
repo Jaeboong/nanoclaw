@@ -224,7 +224,7 @@ describe('collab state', () => {
 });
 
 describe('collab text commands', () => {
-  it('parses simple start, selected starter, max, status, and stop commands', () => {
+  it('parses plain task starts and does not reserve control words', () => {
     expect(parseCollabTextCommand('/collab 기업 분석해')).toEqual({
       type: 'start',
       starter: 'claude',
@@ -236,13 +236,20 @@ describe('collab text commands', () => {
       task: 'OpenClaw 점검',
     });
     expect(parseCollabTextCommand('/collab max 5')).toEqual({
-      type: 'max',
-      maxRounds: 5,
+      type: 'start',
+      starter: 'claude',
+      task: 'max 5',
     });
     expect(parseCollabTextCommand('/collab status')).toEqual({
-      type: 'status',
+      type: 'start',
+      starter: 'claude',
+      task: 'status',
     });
-    expect(parseCollabTextCommand('/collab stop')).toEqual({ type: 'stop' });
+    expect(parseCollabTextCommand('/collab stop')).toEqual({
+      type: 'start',
+      starter: 'claude',
+      task: 'stop',
+    });
     expect(parseCollabTextCommand('/not-collab')).toBeNull();
   });
 

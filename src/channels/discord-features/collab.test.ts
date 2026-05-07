@@ -2,7 +2,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { MessageFlags } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../sender-allowlist.js', () => ({
@@ -14,7 +13,7 @@ vi.mock('../../sender-allowlist.js', () => ({
   })),
 }));
 
-import { getCollabMaxRounds, getCollabSession } from '../../collab-state.js';
+import { getCollabSession } from '../../collab-state.js';
 
 import { collabFeature, handleCollabInteraction } from './collab.js';
 import type { CollabFeatureContext, CollabInteraction } from './collab.js';
@@ -32,10 +31,9 @@ afterEach(() => {
 });
 
 function createInteraction(params: {
-  mode?: string | null;
-  agent?: string | null;
+  start?: string | null;
   task?: string | null;
-  value?: number | null;
+  max?: number | null;
 }): CollabInteraction {
   return {
     commandName: 'collab',
@@ -43,13 +41,12 @@ function createInteraction(params: {
     user: { id: 'user-1', username: 'tester' },
     options: {
       getString: vi.fn((name: string) => {
-        if (name === 'mode') return params.mode ?? null;
-        if (name === 'agent') return params.agent ?? null;
+        if (name === 'start') return params.start ?? null;
         if (name === 'task') return params.task ?? null;
         return null;
       }),
       getInteger: vi.fn((name: string) =>
-        name === 'value' ? (params.value ?? null) : null,
+        name === 'max' ? (params.max ?? null) : null,
       ),
     },
     reply: vi.fn(async () => undefined),
@@ -73,8 +70,11 @@ function createContext(): CollabFeatureContext {
 describe('collabFeature', () => {
   it('registers a collab slash command', () => {
     const commands = collabFeature.slashCommands();
+    const commandJson = commands[0];
+    const optionNames = commandJson.options?.map((option) => option.name);
 
     expect(commands.map((c) => c.name)).toContain('collab');
+    expect(optionNames).toEqual(['task', 'start', 'max']);
   });
 
   it('starts a Claude-first session by default and keeps protocol hidden from Discord', async () => {
@@ -114,7 +114,7 @@ describe('collabFeature', () => {
 
   it('starts a Codex-first session when 나붕봇 is selected', async () => {
     const interaction = createInteraction({
-      agent: 'codex',
+      start: 'codex',
       task: 'OpenClaw 점검해',
     });
     const ctx = createContext();
@@ -133,40 +133,20 @@ describe('collabFeature', () => {
     );
   });
 
-  it('sets the channel max rounds with an ephemeral reply', async () => {
-    const interaction = createInteraction({ mode: 'max', value: 5 });
+  it('uses max as the current session round limit', async () => {
+    const interaction = createInteraction({ task: '짧게 협업해', max: 5 });
     const ctx = createContext();
 
     await handleCollabInteraction(interaction, ctx, { statePath });
 
-    expect(getCollabMaxRounds('dc:1234567890123456', statePath)).toBe(5);
-    expect(interaction.reply).toHaveBeenCalledWith({
-      content: 'Collab max rounds changed to: 5',
-      flags: MessageFlags.Ephemeral,
+    expect(getCollabSession('dc:1234567890123456', statePath)).toMatchObject({
+      task: '짧게 협업해',
+      maxRounds: 5,
     });
-  });
-
-  it('returns status and stops an active session', async () => {
-    const ctx = createContext();
-    await handleCollabInteraction(
-      createInteraction({ task: '상태 테스트' }),
-      ctx,
-      { statePath },
-    );
-
-    const statusInteraction = createInteraction({ mode: 'status' });
-    await handleCollabInteraction(statusInteraction, ctx, { statePath });
-    expect(statusInteraction.reply).toHaveBeenCalledWith(
+    expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('active'),
-        flags: MessageFlags.Ephemeral,
+        content: expect.stringContaining('Max rounds: 5'),
       }),
     );
-
-    const stopInteraction = createInteraction({ mode: 'stop' });
-    await handleCollabInteraction(stopInteraction, ctx, { statePath });
-    expect(getCollabSession('dc:1234567890123456', statePath)).toMatchObject({
-      status: 'stopped',
-    });
   });
 });

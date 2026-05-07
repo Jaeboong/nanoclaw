@@ -45,9 +45,6 @@ export type CollabTextCommand =
       readonly starter: CollabAgent;
       readonly task: string;
     }
-  | { readonly type: 'max'; readonly maxRounds: number }
-  | { readonly type: 'status' }
-  | { readonly type: 'stop' }
   | { readonly type: 'invalid'; readonly reason: string };
 
 export interface CollabTurnResult {
@@ -243,12 +240,16 @@ export function startCollabSession(
     readonly task: string;
     readonly starter: CollabAgent;
     readonly startedBy: string;
+    readonly maxRounds?: number;
   },
   filePath?: string,
 ): CollabSession {
   const task = params.task.trim();
   const timestamp = nowIso();
-  const maxRounds = getCollabMaxRounds(params.chatJid, filePath);
+  const maxRounds =
+    params.maxRounds === undefined
+      ? getCollabMaxRounds(params.chatJid, filePath)
+      : normalizeMaxRounds(params.maxRounds);
   const session: CollabSession = {
     id: randomUUID(),
     task,
@@ -455,21 +456,11 @@ export function parseCollabTextCommand(text: string): CollabTextCommand | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith('/collab')) return null;
   const rest = trimmed.slice('/collab'.length).trim();
-  if (!rest) return { type: 'status' };
+  if (!rest) return { type: 'invalid', reason: 'Usage: /collab <task>' };
 
   const [firstRaw, ...tailParts] = rest.split(/\s+/);
   const first = firstRaw?.toLowerCase();
   const tail = tailParts.join(' ').trim();
-
-  if (first === 'status') return { type: 'status' };
-  if (first === 'stop') return { type: 'stop' };
-  if (first === 'max') {
-    const parsed = Number.parseInt(tailParts[0] ?? '', 10);
-    if (!Number.isFinite(parsed)) {
-      return { type: 'invalid', reason: 'Usage: /collab max <rounds>' };
-    }
-    return { type: 'max', maxRounds: normalizeMaxRounds(parsed) };
-  }
 
   if (first === '나붕봇' || first === 'codex') {
     return tail
