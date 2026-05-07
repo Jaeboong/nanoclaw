@@ -223,6 +223,7 @@ function createMessage(overrides: {
   attachments?: Map<string, any>;
   reference?: { messageId?: string };
   mentionsBotId?: boolean;
+  mentionedOtherBotIds?: string[];
 }) {
   const channelId = overrides.channelId ?? '1234567890123456';
   const authorId = overrides.authorId ?? '55512345';
@@ -230,7 +231,10 @@ function createMessage(overrides: {
 
   const mentionsMap = new Map();
   if (overrides.mentionsBotId) {
-    mentionsMap.set(botId, { id: botId });
+    mentionsMap.set(botId, { id: botId, bot: true });
+  }
+  for (const mentionedBotId of overrides.mentionedOtherBotIds ?? []) {
+    mentionsMap.set(mentionedBotId, { id: mentionedBotId, bot: true });
   }
 
   return {
@@ -384,7 +388,7 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
-    it('ignores bot messages', async () => {
+    it('stores bot messages as context without treating them as user messages', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts, []);
       await channel.connect();
@@ -392,8 +396,20 @@ describe('DiscordChannel', () => {
       const msg = createMessage({ isBot: true, content: 'I am a bot' });
       await triggerMessage(msg);
 
-      expect(opts.onMessage).not.toHaveBeenCalled();
-      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+      expect(opts.onChatMetadata).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.any(String),
+        expect.any(String),
+        'discord',
+        false,
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content: 'I am a bot',
+          is_bot_message: true,
+        }),
+      );
     });
 
     it('uses member displayName when available (server nickname)', async () => {
@@ -505,6 +521,30 @@ describe('DiscordChannel', () => {
         'dc:1234567890123456',
         expect.objectContaining({
           content: '@Andy what time is it?',
+          mentioned_bot_ids: ['999888777'],
+          mentions_self: true,
+        }),
+      );
+    });
+
+    it('records other bot mentions without translating to this bot trigger', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts, []);
+      await channel.connect();
+
+      const msg = createMessage({
+        content: '<@222333444> answer this',
+        mentionedOtherBotIds: ['222333444'],
+        guildName: 'Server',
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content: '<@222333444> answer this',
+          mentioned_bot_ids: ['222333444'],
+          mentions_self: false,
         }),
       );
     });

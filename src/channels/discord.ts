@@ -113,8 +113,11 @@ export class DiscordChannel implements Channel {
         }
         return;
       }
-      // Ignore bot messages (including own)
-      if (message.author.bot) return;
+      // Other bots are stored as cross-agent context, but they must never
+      // trigger turns. Ignore our own outbound messages to avoid echoing.
+      if (message.author.bot && message.author.id === this.client?.user?.id) {
+        return;
+      }
 
       const channelId = message.channelId;
       const chatJid = `dc:${channelId}`;
@@ -137,6 +140,10 @@ export class DiscordChannel implements Channel {
       }
 
       // Translate Discord @bot mentions into TRIGGER_PATTERN format.
+      let mentionsSelf = false;
+      const mentionedBotIds = Array.from(message.mentions.users.values())
+        .filter((user) => user.bot)
+        .map((user) => user.id);
       if (this.client?.user) {
         const botId = this.client.user.id;
         const isBotMentioned =
@@ -145,6 +152,7 @@ export class DiscordChannel implements Channel {
           content.includes(`<@!${botId}>`);
 
         if (isBotMentioned) {
+          mentionsSelf = true;
           content = content
             .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
             .trim();
@@ -229,6 +237,9 @@ export class DiscordChannel implements Channel {
         content,
         timestamp,
         is_from_me: false,
+        is_bot_message: message.author.bot,
+        mentioned_bot_ids: mentionedBotIds,
+        mentions_self: mentionsSelf,
       });
 
       logger.info(
