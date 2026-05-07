@@ -68,6 +68,11 @@ import {
   setResponder,
 } from './responder-state.js';
 import {
+  buildCollabTurnPrompt,
+  getActiveCollabSession,
+  recordCollabAgentTurn,
+} from './collab-state.js';
+import {
   hasAuthorizedTrigger,
   shouldProcessForResponder,
 } from './responder-routing.js';
@@ -129,6 +134,66 @@ function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
       );
     },
   );
+}
+
+function activeCollabForRouting(chatJid: string):
+  | { active: true; nextAgent: 'claude' | 'codex' }
+  | undefined {
+  const session = getActiveCollabSession(chatJid);
+  if (!session) return undefined;
+  return { active: true, nextAgent: session.nextAgent };
+}
+
+function buildPromptForClaudeTurn(
+  chatJid: string,
+  basePrompt: string,
+): string {
+  const session = getActiveCollabSession(chatJid);
+  if (!session || session.nextAgent !== 'claude') return basePrompt;
+  return buildCollabTurnPrompt({
+    agent: 'claude',
+    task: session.task,
+    round: session.round + 1,
+    maxRounds: session.maxRounds,
+    conversation: basePrompt,
+  });
+}
+
+function recordClaudeCollabTurnIfNeeded(chatJid: string, text: string): void {
+  const session = getActiveCollabSession(chatJid);
+  if (!session || session.nextAgent !== 'claude') return;
+  const result = recordCollabAgentTurn(chatJid, 'claude', text);
+  logger.info(
+    {
+      chatJid,
+      reason: result.reason,
+      status: result.session?.status,
+      nextAgent: result.session?.nextAgent,
+      round: result.session?.round,
+    },
+    'Collab Claude turn recorded',
+  );
+}
+
+function recordCodexCollabTurnIfNeeded(chatJid: string, msg: NewMessage): void {
+  if (!msg.is_bot_message) return;
+  const session = getActiveCollabSession(chatJid);
+  if (!session || session.nextAgent !== 'codex') return;
+  const result = recordCollabAgentTurn(chatJid, 'codex', msg.content);
+  logger.info(
+    {
+      chatJid,
+      sender: msg.sender,
+      reason: result.reason,
+      status: result.session?.status,
+      nextAgent: result.session?.nextAgent,
+      round: result.session?.round,
+    },
+    'Collab Codex turn recorded',
+  );
+  if (result.session?.status === 'active' && result.session.nextAgent === 'claude') {
+    queue.enqueueMessageCheck(chatJid);
+  }
 }
 
 function loadState(): void {
@@ -271,10 +336,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   if (missedMessages.length === 0) return true;
+  const collab = activeCollabForRouting(chatJid);
+  const isClaudeCollabTurn = collab?.nextAgent === 'claude';
   const interactiveMessages = missedMessages.filter((m) => !m.is_bot_message);
-  if (interactiveMessages.length === 0) return true;
+  if (interactiveMessages.length === 0 && !isClaudeCollabTurn) return true;
   const routingMessages = [
-    interactiveMessages[interactiveMessages.length - 1],
+    isClaudeCollabTurn
+      ? missedMessages[missedMessages.length - 1]
+      : interactiveMessages[interactiveMessages.length - 1],
   ].filter((m): m is NewMessage => m !== undefined);
 
   // --- Session command interception (before trigger check) ---
@@ -321,13 +390,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       messages: routingMessages,
       triggerPattern: groupTriggerPattern,
       allowlist: allowlistCfg,
+      collab,
     })
   ) {
     return true;
   }
 
   // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  if (!isMainGroup && group.requiresTrigger !== false && !isClaudeCollabTurn) {
     if (
       !hasAuthorizedTrigger({
         chatJid,
@@ -340,7 +410,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const prompt = buildPromptForClaudeTurn(
+    chatJid,
+    formatMessages(missedMessages, TIMEZONE),
+  );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -383,6 +456,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
+        recordClaudeCollabTurnIfNeeded(chatJid, text);
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -605,6 +679,8 @@ async function startMessageLoop(): Promise<void> {
           // --- End session command interception ---
 
           const allowlistCfg = loadSenderAllowlist();
+          const collab = activeCollabForRouting(chatJid);
+          const isClaudeCollabTurn = collab?.nextAgent === 'claude';
           if (
             !shouldProcessForResponder({
               responder: getResponder(chatJid),
@@ -612,6 +688,7 @@ async function startMessageLoop(): Promise<void> {
               messages: groupMessages,
               triggerPattern: loopTriggerPattern,
               allowlist: allowlistCfg,
+              collab,
             })
           ) {
             continue;
@@ -622,7 +699,7 @@ async function startMessageLoop(): Promise<void> {
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
-          if (needsTrigger) {
+          if (needsTrigger && !isClaudeCollabTurn) {
             if (
               !hasAuthorizedTrigger({
                 chatJid,
@@ -646,7 +723,10 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const formatted = buildPromptForClaudeTurn(
+            chatJid,
+            formatMessages(messagesToSend, TIMEZONE),
+          );
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -854,6 +934,7 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      recordCodexCollabTurnIfNeeded(chatJid, msg);
     },
     onChatMetadata: (
       chatJid: string,

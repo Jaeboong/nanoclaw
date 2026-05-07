@@ -17,10 +17,7 @@ vi.mock('../../sender-allowlist.js', () => ({
 import { getCollabMaxRounds, getCollabSession } from '../../collab-state.js';
 
 import { collabFeature, handleCollabInteraction } from './collab.js';
-import type {
-  CollabFeatureContext,
-  CollabInteraction,
-} from './collab.js';
+import type { CollabFeatureContext, CollabInteraction } from './collab.js';
 
 let tempDir: string;
 let statePath: string;

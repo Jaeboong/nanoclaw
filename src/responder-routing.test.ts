@@ -102,6 +102,32 @@ describe('responder routing', () => {
     ).toBe(true);
   });
 
+  it('lets an active collab Claude turn process bot handoff messages', () => {
+    expect(
+      shouldProcessForResponder({
+        responder: 'codex',
+        chatJid: 'dc:channel',
+        messages: [msg({ is_bot_message: true, sender: 'codex-bot' })],
+        triggerPattern,
+        allowlist: allowAll,
+        collab: { active: true, nextAgent: 'claude' },
+      }),
+    ).toBe(true);
+  });
+
+  it('blocks Claude while active collab is waiting for Codex', () => {
+    expect(
+      shouldProcessForResponder({
+        responder: 'both',
+        chatJid: 'dc:channel',
+        messages: [msg({ content: '@Andy answer this' })],
+        triggerPattern,
+        allowlist: allowAll,
+        collab: { active: true, nextAgent: 'codex' },
+      }),
+    ).toBe(false);
+  });
+
   it('does not treat denied sender triggers as authorized', () => {
     const allowlist: SenderAllowlistConfig = {
       ...allowAll,

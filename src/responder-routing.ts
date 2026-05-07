@@ -2,6 +2,7 @@ import { isClaudeResponder } from './responder-state.js';
 import type { Responder } from './responder-state.js';
 import { isTriggerAllowed } from './sender-allowlist.js';
 import type { SenderAllowlistConfig } from './sender-allowlist.js';
+import type { CollabAgent } from './collab-state.js';
 import type { NewMessage } from './types.js';
 
 export function hasAuthorizedTrigger(params: {
@@ -33,7 +34,12 @@ export function shouldProcessForResponder(params: {
   messages: NewMessage[];
   triggerPattern: RegExp;
   allowlist: SenderAllowlistConfig;
+  collab?: { active: boolean; nextAgent: CollabAgent };
 }): boolean {
+  if (params.collab?.active) {
+    return params.collab.nextAgent === 'claude';
+  }
+
   if (hasOtherBotMention(params.messages)) {
     return false;
   }
