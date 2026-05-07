@@ -77,7 +77,7 @@ describe('collabFeature', () => {
     expect(commands.map((c) => c.name)).toContain('collab');
   });
 
-  it('starts a Claude-first session by default and stores a synthetic task', async () => {
+  it('starts a Claude-first session by default and keeps protocol hidden from Discord', async () => {
     const interaction = createInteraction({ task: '기업 분석해' });
     const ctx = createContext();
 
@@ -102,7 +102,12 @@ describe('collabFeature', () => {
     );
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('재붕봇부터 시작'),
+        content: expect.stringContaining('Collab started'),
+      }),
+    );
+    expect(interaction.reply).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('COLLAB_STATUS'),
       }),
     );
   });
@@ -123,7 +128,7 @@ describe('collabFeature', () => {
     });
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('나붕봇부터 시작'),
+        content: expect.stringContaining('Starter: 나붕봇'),
       }),
     );
   });

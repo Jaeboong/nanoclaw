@@ -119,6 +119,17 @@ function isStartMode(mode: string | null): boolean {
   return mode === null || mode === 'start';
 }
 
+function agentDisplayName(agent: CollabAgent): string {
+  return agent === 'claude' ? '재붕봇' : '나붕봇';
+}
+
+function formatStartReply(params: {
+  readonly starter: CollabAgent;
+  readonly maxRounds: number;
+}): string {
+  return `Collab started. Starter: ${agentDisplayName(params.starter)}. Max rounds: ${params.maxRounds}.`;
+}
+
 export async function handleCollabInteraction(
   interaction: CollabInteraction,
   ctx: CollabFeatureContext,
@@ -229,7 +240,12 @@ export async function handleCollabInteraction(
     is_bot_message: false,
   });
 
-  await interaction.reply({ content: kickoff });
+  await interaction.reply({
+    content: formatStartReply({
+      starter: session.starter,
+      maxRounds: session.maxRounds,
+    }),
+  });
   return true;
 }
 
