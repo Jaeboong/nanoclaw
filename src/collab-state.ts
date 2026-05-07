@@ -352,7 +352,9 @@ export function recordCollabAgentTurn(
     return { session, reason: 'wrong-agent' };
   }
 
-  const turnStatus = parseCollabTurnStatus(text);
+  const parsedTurnStatus = parseCollabTurnStatus(text);
+  const turnStatus: CollabTurnStatus =
+    parsedTurnStatus === 'NEEDS_USER' ? 'CONTINUE' : parsedTurnStatus;
   const round = session.round + 1;
   const done = {
     ...session.done,
@@ -364,12 +366,7 @@ export function recordCollabAgentTurn(
   let endedReason: string | undefined;
   let reason: CollabTurnResult['reason'] = 'continue';
 
-  if (turnStatus === 'NEEDS_USER') {
-    status = 'paused';
-    endedReason = 'needs-user';
-    nextAgent = agent;
-    reason = 'needs-user';
-  } else if (turnStatus === 'BLOCKED') {
+  if (turnStatus === 'BLOCKED') {
     status = 'blocked';
     endedReason = 'blocked';
     nextAgent = agent;
@@ -434,8 +431,10 @@ export function buildCollabTurnPrompt(params: {
     `Task: ${params.task}`,
     `Current round ${params.round}/${params.maxRounds}. One round is one agent turn.`,
     'Read the prior conversation, do only the next useful slice of work, and hand off if more work remains.',
+    'Do not use NEEDS_USER. For routine writes, cleanup, verification, and Notion updates, continue autonomously.',
+    'Use BLOCKED only when missing credentials/permissions or a genuinely high-risk/destructive choice requires the user.',
     'End your reply with exactly one protocol line:',
-    'COLLAB_STATUS: DONE|CONTINUE|NEEDS_USER|BLOCKED',
+    'COLLAB_STATUS: DONE|CONTINUE|BLOCKED',
     '',
     params.conversation,
   ].join('\n');

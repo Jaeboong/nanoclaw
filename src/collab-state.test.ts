@@ -100,6 +100,30 @@ describe('collab state', () => {
     expect(second.reason).toBe('both-done');
   });
 
+  it('treats NEEDS_USER as a continuation instead of pausing the session', () => {
+    startCollabSession(
+      {
+        chatJid: 'dc:channel',
+        task: '노션 정리해',
+        starter: 'claude',
+        startedBy: 'user-1',
+      },
+      statePath,
+    );
+
+    const result = recordCollabAgentTurn(
+      'dc:channel',
+      'claude',
+      '사용자 OK 받으면 진행\nCOLLAB_STATUS: NEEDS_USER',
+      statePath,
+    );
+
+    expect(result.reason).toBe('continue');
+    expect(result.session?.status).toBe('active');
+    expect(result.session?.nextAgent).toBe('codex');
+    expect(result.session?.lastStatus).toBe('CONTINUE');
+  });
+
   it('completes when max rounds is reached before both agents are done', () => {
     setCollabMaxRounds('dc:channel', 2, 'user-1', statePath);
     startCollabSession(
@@ -140,7 +164,8 @@ describe('collab state', () => {
 
     expect(prompt).toContain('OpenClaw 점검');
     expect(prompt).toContain('round 2/10');
-    expect(prompt).toContain('COLLAB_STATUS: DONE|CONTINUE|NEEDS_USER|BLOCKED');
+    expect(prompt).toContain('COLLAB_STATUS: DONE|CONTINUE|BLOCKED');
+    expect(prompt).toContain('Do not use NEEDS_USER');
     expect(prompt).toContain('재붕봇: 원인 후보 정리');
   });
 
