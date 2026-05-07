@@ -123,6 +123,9 @@ export class DiscordChannel implements Channel {
 
       const channelId = message.channelId;
       const chatJid = `dc:${channelId}`;
+      if (!this.ownsJid(chatJid)) {
+        return;
+      }
       let content = message.content;
       const timestamp = message.createdAt.toISOString();
       const senderName =

@@ -388,6 +388,40 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
+    it('ignores inbound messages outside an exact JID channel binding', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:1234567890123456': {
+            name: 'Job',
+            folder: 'job',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+          'dc:9999999999999999': {
+            name: 'Monitoring',
+            folder: 'monitoring',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts, [], {
+        exactJids: ['dc:9999999999999999'],
+        name: 'discord-monitoring',
+      });
+      await channel.connect();
+
+      await triggerMessage(
+        createMessage({
+          channelId: '1234567890123456',
+          content: 'job channel message',
+        }),
+      );
+
+      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
     it('stores bot messages as context without treating them as user messages', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts, []);
