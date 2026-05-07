@@ -14,6 +14,12 @@ If a single change mixes tiers, split it. Personal data goes to ignored paths (`
 
 Before publishing, run `npm run check:boundaries` and address any reported tracked-instance leaks.
 
+## 1.1 Local extension harness (mandatory for local features)
+
+For Discord, responder routing, DART, observability, or other local fork behavior, also read `docs/local-extension-harness.md` and the common harness at sibling path `../Agents-Harness/docs/claw-extension-harness.md`.
+
+Local behavior must stay in module/override/sidecar layers where possible. Patch core only when there is no cleaner seam, keep that patch separate, and document the reason.
+
 ## 2. Delegation contract
 
 When delegating work to a sub-agent (Codex, Sonnet sub-agent, Explore agent, etc.):
