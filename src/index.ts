@@ -136,18 +136,15 @@ function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
   );
 }
 
-function activeCollabForRouting(chatJid: string):
-  | { active: true; nextAgent: 'claude' | 'codex' }
-  | undefined {
+function activeCollabForRouting(
+  chatJid: string,
+): { active: true; nextAgent: 'claude' | 'codex' } | undefined {
   const session = getActiveCollabSession(chatJid);
   if (!session) return undefined;
   return { active: true, nextAgent: session.nextAgent };
 }
 
-function buildPromptForClaudeTurn(
-  chatJid: string,
-  basePrompt: string,
-): string {
+function buildPromptForClaudeTurn(chatJid: string, basePrompt: string): string {
   const session = getActiveCollabSession(chatJid);
   if (!session || session.nextAgent !== 'claude') return basePrompt;
   return buildCollabTurnPrompt({
@@ -191,7 +188,10 @@ function recordCodexCollabTurnIfNeeded(chatJid: string, msg: NewMessage): void {
     },
     'Collab Codex turn recorded',
   );
-  if (result.session?.status === 'active' && result.session.nextAgent === 'claude') {
+  if (
+    result.session?.status === 'active' &&
+    result.session.nextAgent === 'claude'
+  ) {
     queue.enqueueMessageCheck(chatJid);
   }
 }
