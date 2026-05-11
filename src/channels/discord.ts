@@ -113,17 +113,23 @@ export class DiscordChannel implements Channel {
         }
         return;
       }
-      // Ignore bot messages (including own)
-      if (message.author.bot) return;
+      // Block ONLY the assistant's own messages (prevents self-trigger loop).
+      // Other bots are allowed through as is_external_bot=true: stored for
+      // context but filtered from trigger polling so they never auto-reply.
+      if (message.author.id === this.client?.user?.id) return;
+      const isExternalBot = message.author.bot;
 
       const channelId = message.channelId;
       const chatJid = `dc:${channelId}`;
       let content = message.content;
       const timestamp = message.createdAt.toISOString();
-      const senderName =
+      const rawSenderName =
         message.member?.displayName ||
         message.author.displayName ||
         message.author.username;
+      // Prefix external bot names so the LLM clearly distinguishes them from
+      // human participants when reading conversation context.
+      const senderName = isExternalBot ? `🤖 ${rawSenderName}` : rawSenderName;
       const sender = message.author.id;
       const msgId = message.id;
 
@@ -137,7 +143,9 @@ export class DiscordChannel implements Channel {
       }
 
       // Translate Discord @bot mentions into TRIGGER_PATTERN format.
-      if (this.client?.user) {
+      // Skip for external bots — we never want another bot's @mention of us
+      // to look like a trigger (defense in depth on top of the polling filter).
+      if (this.client?.user && !isExternalBot) {
         const botId = this.client.user.id;
         const isBotMentioned =
           message.mentions.users.has(botId) ||
@@ -191,7 +199,8 @@ export class DiscordChannel implements Channel {
       }
 
       // Download attachments to group inbox so the agent can read them.
-      if (message.attachments.size > 0) {
+      // Skip for external bots to avoid disk fill from unrelated bot uploads.
+      if (message.attachments.size > 0 && !isExternalBot) {
         const results = await Promise.all(
           [...message.attachments.values()].map((att) =>
             saveAttachment(
@@ -220,7 +229,9 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Deliver message — startMessageLoop() will pick it up
+      // Deliver message — startMessageLoop() will pick it up.
+      // External bots are stored for context but excluded from trigger polling
+      // (getNewMessages filters is_external_bot=0).
       this.opts.onMessage(chatJid, {
         id: msgId,
         chat_jid: chatJid,
@@ -229,6 +240,7 @@ export class DiscordChannel implements Channel {
         content,
         timestamp,
         is_from_me: false,
+        is_external_bot: isExternalBot,
       });
 
       logger.info(

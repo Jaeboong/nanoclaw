@@ -737,8 +737,15 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      // Sender allowlist drop mode: discard messages from denied senders before storing.
+      // Skip for own/external bot messages — bot traffic is governed by trigger
+      // filtering (is_external_bot=0 in getNewMessages), not the per-sender allowlist.
+      if (
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        !msg.is_external_bot &&
+        registeredGroups[chatJid]
+      ) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&

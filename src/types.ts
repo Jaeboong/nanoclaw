@@ -51,6 +51,12 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  /**
+   * True for messages sent by other bots in the same channel (not the assistant itself).
+   * Stored in DB and visible in agent context, but filtered out of trigger polling
+   * so external bot activity never auto-spawns a container.
+   */
+  is_external_bot?: boolean;
   thread_id?: string;
   reply_to_message_id?: string;
   reply_to_message_content?: string;
