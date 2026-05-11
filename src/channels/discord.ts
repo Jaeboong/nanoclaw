@@ -122,6 +122,28 @@ export class DiscordChannel implements Channel {
       const channelId = message.channelId;
       const chatJid = `dc:${channelId}`;
       let content = message.content;
+      // External bots (including other nanoclaw instances) often deliver text
+      // via embeds rather than message.content — buildEmbedsForMessage wraps
+      // even plain replies in a white embed, leaving content="". Harvest the
+      // visible text so the agent reading this message can actually see it.
+      if (isExternalBot && !content.trim()) {
+        const parts: string[] = [];
+        for (const embed of message.embeds) {
+          if (embed.title) parts.push(embed.title);
+          if (embed.description) parts.push(embed.description);
+          if (embed.fields?.length) {
+            for (const f of embed.fields) parts.push(`${f.name}: ${f.value}`);
+          }
+          if (embed.footer?.text) parts.push(`(${embed.footer.text})`);
+        }
+        for (const sticker of message.stickers.values()) {
+          parts.push(`[sticker: ${sticker.name}]`);
+        }
+        for (const att of message.attachments.values()) {
+          parts.push(`[attachment: ${att.name ?? att.url}]`);
+        }
+        content = parts.filter(Boolean).join('\n');
+      }
       const timestamp = message.createdAt.toISOString();
       const rawSenderName =
         message.member?.displayName ||
