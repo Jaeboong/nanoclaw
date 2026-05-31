@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jira-automation"
+version = "0.1.0"
+description = "Agent-friendly Jira CLI — designed to be consumed by Claude Code / Codex skills."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jaeboong" }]
+dependencies = [
+    "jira>=3.5.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Jaeboong/Jira_automation"
+Repository = "https://github.com/Jaeboong/Jira_automation"
+
+[project.scripts]
+jira = "jira_automation.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jira_automation*"]
+exclude = ["legacy*", "scripts*", "docs*"]

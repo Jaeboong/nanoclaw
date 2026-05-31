@@ -48,11 +48,29 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         curl \
         git \
+        gh \
+        poppler-utils \
+        python3 \
+        python3-venv \
+        gnupg \
         tini \
         unzip \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
        fi \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI (client only) — for instances that pass the host docker.sock into
+# the agent container (see project_jh_server_privileged). Separate layer because
+# it needs the Docker apt repo + keyring.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Chromium path for agent-browser / Playwright consumers
@@ -106,6 +124,23 @@ COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
+# Notion MCP server — spawned per-container via container.json mcpServers[].env
+# when NOTION_TOKEN is wired (see env injection). Installed globally so the
+# binary is on PATH at spawn time.
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "@notionhq/notion-mcp-server"
+
+# ---- jira CLI (jira_automation) ----------------------------------------------
+# Isolated venv on PATH. Source lives in container/jira-automation/ (build ctx).
+# Host mounts ~/.config/jira-automation -> /workspace/extra/jira-automation so
+# the `jira` CLI picks up .env + convention.md from there at runtime.
+COPY jira-automation /opt/jira-cli-src
+RUN python3 -m venv /opt/jira-cli \
+    && /opt/jira-cli/bin/pip install --no-cache-dir /opt/jira-cli-src \
+    && rm -rf /opt/jira-cli-src
+ENV PATH="/opt/jira-cli/bin:${PATH}"
+ENV JIRA_CONFIG_DIR="/workspace/extra/jira-automation"
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
@@ -119,6 +154,14 @@ RUN chmod +x /app/entrypoint.sh
 RUN mkdir -p /workspace/group /workspace/extra && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
+
+# passwd/group entries for common host uids (1001-1005) so getpwuid() resolves
+# when docker runs with --user <host-uid>:<gid>. Without this, tools like SSH/gh
+# fail with "No user exists for uid N". HOME points at world-writable /home/node.
+RUN for i in 1 2 3 4 5; do \
+      echo "host${i}:x:100${i}:100${i}:host user:/home/node:/bin/bash" >> /etc/passwd; \
+      echo "host${i}:x:100${i}:" >> /etc/group; \
+    done
 
 USER node
 WORKDIR /workspace/group

@@ -11,6 +11,10 @@
 
 set -e
 
+# Group-writable umask for shared host bind-mounts (host/other-uid group access).
+# Default 0022 is a no-op; the host passes NANO_UMASK=0007 for shared installs.
+umask "${NANO_UMASK:-0022}"
+
 cat > /tmp/input.json
 
 exec bun run /app/src/index.ts < /tmp/input.json
