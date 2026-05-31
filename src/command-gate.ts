@@ -46,7 +46,16 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   return { action: 'pass' };
 }
 
-function isAdmin(userId: string | null, agentGroupId: string): boolean {
+/**
+ * Whether `userId` holds owner/admin over `agentGroupId`. Exported so the
+ * Discord slash/interaction framework gates admin commands with the exact
+ * same semantics as the typed-command gate (owner/global-admin match
+ * regardless of group via the `agent_group_id IS NULL` row; scoped admin
+ * matches the specific group). `agentGroupId` may be null for commands not
+ * bound to a channel — only owner/global-admin then authorize. When the
+ * permissions module isn't installed (`user_roles` absent), allow all.
+ */
+export function isAdmin(userId: string | null, agentGroupId: string | null): boolean {
   if (!userId) return false;
   if (!hasTable(getDb(), 'user_roles')) return true; // no permissions module = allow all
   const db = getDb();

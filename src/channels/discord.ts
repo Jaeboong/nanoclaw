@@ -5,8 +5,13 @@
 import { createDiscordAdapter } from '@chat-adapter/discord';
 
 import { readEnvFile } from '../env.js';
-import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
+import { log } from '../log.js';
+import { createChatSdkBridge, setForwardedInteractionRouter, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { registerSlashCommandsWithDiscord, routeForwardedInteraction } from './discord-interactions.js';
+// Feature modules self-register their slash commands / component handlers on
+// import (side-effect). Add Task-8+ feature imports here so they populate the
+// interaction registry before registerSlashCommandsWithDiscord runs below.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
@@ -27,10 +32,21 @@ registerChannelAdapter('discord', {
       publicKey: env.DISCORD_PUBLIC_KEY,
       applicationId: env.DISCORD_APPLICATION_ID,
     });
+    const botToken = env.DISCORD_BOT_TOKEN;
+    const applicationId = env.DISCORD_APPLICATION_ID ?? '';
+
+    // Route forwarded gateway interactions (slash + non-ncq components) into
+    // the additive interaction module, and register slash commands with
+    // Discord (best-effort, REST — independent of the gateway connection).
+    setForwardedInteractionRouter(routeForwardedInteraction);
+    void registerSlashCommandsWithDiscord(applicationId, botToken).catch((err) => {
+      log.warn('Discord slash command registration failed', { err });
+    });
+
     return createChatSdkBridge({
       adapter: discordAdapter,
       concurrency: 'concurrent',
-      botToken: env.DISCORD_BOT_TOKEN,
+      botToken,
       extractReplyContext,
       supportsThreads: true,
     });

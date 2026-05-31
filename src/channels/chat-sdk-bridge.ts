@@ -86,6 +86,26 @@ export interface ChatSdkBridgeConfig {
 }
 
 /**
+ * Optional router for forwarded gateway interactions the bridge doesn't own —
+ * slash commands (type 2) and non-`ncq:` message components (type 3). The
+ * built-in `ncq:` ask_question card flow is still handled inline below.
+ *
+ * This is a v2-style core seam (cf. `setSenderResolver` / `setMessageInterceptor`
+ * in router.ts): core calls the registered router if present; an additive
+ * module (`channels/discord-interactions.ts`) registers it on import. Keeping
+ * the seam generic means the bridge stays free of any Discord-specific import,
+ * and custom interaction handling lives entirely in the module — minimizing
+ * upstream-merge divergence.
+ */
+type ForwardedInteractionRouter = (interaction: Record<string, unknown>) => Promise<boolean>;
+let forwardedInteractionRouter: ForwardedInteractionRouter | null = null;
+
+/** Register the router for forwarded gateway interactions. Last call wins. */
+export function setForwardedInteractionRouter(router: ForwardedInteractionRouter): void {
+  forwardedInteractionRouter = router;
+}
+
+/**
  * Split `text` into chunks no larger than `limit`, preferring paragraph
  * breaks, then line breaks, then a hard character cut as a last resort.
  * Preserves code fences only structurally — a fenced block that straddles a
@@ -641,9 +661,13 @@ async function handleForwardedEvent(
   // Handle interaction events (button clicks) — not handled by adapter's handleForwardedGatewayEvent
   if (event.type === 'GATEWAY_INTERACTION_CREATE' && event.data) {
     const interaction = event.data;
-    // type 3 = MessageComponent (button/select)
-    if (interaction.type === 3) {
-      const customId = (interaction.data as Record<string, unknown>)?.custom_id as string;
+    const interactionCustomId = (interaction.data as Record<string, unknown>)?.custom_id as string | undefined;
+    // type 3 = MessageComponent. The built-in ask_question (`ncq:`) card flow
+    // is handled inline below (it updates the card directly). Slash commands
+    // (type 2) and all other components route to the registered interaction
+    // router (see setForwardedInteractionRouter) further down.
+    if (interaction.type === 3 && interactionCustomId?.startsWith('ncq:')) {
+      const customId = interactionCustomId;
       // In guilds the clicker is at interaction.member.user; in DMs it's interaction.user directly.
       const user =
         ((interaction.member as Record<string, unknown>)?.user as Record<string, string> | undefined) ??
@@ -698,6 +722,13 @@ async function handleForwardedEvent(
       if (questionId && selectedOption) {
         setupConfig.onAction(questionId, selectedOption, user?.id || '');
       }
+      return;
+    }
+
+    // Slash commands (type 2) and non-`ncq:` components (type 3) → registered
+    // interaction router (additive module). Returns true when it handled the
+    // interaction; otherwise fall through to the adapter's webhook handler.
+    if (forwardedInteractionRouter && (await forwardedInteractionRouter(interaction))) {
       return;
     }
   }
