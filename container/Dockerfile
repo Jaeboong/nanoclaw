@@ -146,6 +146,12 @@ ENV JIRA_CONFIG_DIR="/workspace/extra/jira-automation"
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+# dart-tool wrapper — runs the DART CLI from mounted source via bun (v2 has no
+# /app/dist build step). DART MCP stdio server is registered per-container in
+# mcpServers when DART_API_KEY is present (see env injection).
+RUN printf '#!/bin/sh\nexec bun /app/src/dart-cli.ts "$@"\n' > /usr/local/bin/dart-tool && \
+    chmod +x /usr/local/bin/dart-tool
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
