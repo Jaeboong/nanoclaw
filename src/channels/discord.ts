@@ -10,8 +10,9 @@ import { createChatSdkBridge, setForwardedInteractionRouter, type ReplyContext }
 import { registerChannelAdapter } from './channel-registry.js';
 import { registerSlashCommandsWithDiscord, routeForwardedInteraction } from './discord-interactions.js';
 // Feature modules self-register their slash commands / component handlers on
-// import (side-effect). Add Task-8+ feature imports here so they populate the
-// interaction registry before registerSlashCommandsWithDiscord runs below.
+// import (side-effect), populating the interaction registry before
+// registerSlashCommandsWithDiscord runs below.
+import './discord-features/runtime-control.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
