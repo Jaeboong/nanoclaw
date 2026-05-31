@@ -31,6 +31,7 @@
     "@chat-adapter/discord": "4.26.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
+    "@napi-rs/canvas": "0.1.99",
     "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "11.10.0",
     "chat": "4.29.0",

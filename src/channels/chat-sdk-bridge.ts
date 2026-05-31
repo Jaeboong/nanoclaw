@@ -45,6 +45,18 @@ export interface ReplyContext {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext | null;
 
+/** An outbound attachment as the bridge passes it to the adapter. */
+export interface OutboundFileUpload {
+  data: Buffer;
+  filename: string;
+}
+
+/** Input/result for {@link ChatSdkBridgeConfig.transformOutboundMessage}. */
+export interface OutboundMessageTransform {
+  text: string;
+  files: readonly OutboundFileUpload[];
+}
+
 export interface ChatSdkBridgeConfig {
   adapter: Adapter;
   /**
@@ -74,6 +86,18 @@ export interface ChatSdkBridgeConfig {
    * quirk (e.g. Telegram's legacy Markdown parse mode).
    */
   transformOutboundText?: (text: string) => string;
+  /**
+   * Optional message-level transform applied before delivery. Unlike
+   * `transformOutboundText` (text → text), this also sees and returns the
+   * attachment list, so a channel can rewrite the body AND add or replace
+   * files — e.g. render CJK markdown tables to PNG attachments so wide
+   * double-width glyphs don't misalign. Async because a transform may do real
+   * work (image rendering). Runs BEFORE `transformOutboundText` so the body it
+   * inspects is the agent's raw markdown, not a platform-sanitized variant.
+   * Generic and platform-agnostic: the bridge passes `{text, files}` and uses
+   * whatever it returns.
+   */
+  transformOutboundMessage?: (msg: OutboundMessageTransform) => Promise<OutboundMessageTransform>;
   /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
@@ -525,14 +549,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       // Normal message
-      const rawText = (content.markdown as string) || (content.text as string);
-      const text = rawText ? transformText(rawText) : rawText;
+      const rawText = (content.markdown as string) || (content.text as string) || '';
+      // Message-level transform first (sees text + files, may rewrite the body
+      // and add/replace attachments), then the text-only platform sanitizer.
+      let bodyText = rawText;
+      let outFiles: readonly OutboundFileUpload[] = message.files ?? [];
+      if (config.transformOutboundMessage && (rawText || outFiles.length > 0)) {
+        const transformed = await config.transformOutboundMessage({ text: rawText, files: outFiles });
+        bodyText = transformed.text;
+        outFiles = transformed.files;
+      }
+      const text = bodyText ? transformText(bodyText) : bodyText;
+      const fileUploads: OutboundFileUpload[] = outFiles.map((f) => ({ data: f.data, filename: f.filename }));
       if (text) {
-        // Attach files if present (FileUpload format: { data, filename })
-        const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
-          data: f.data,
-          filename: f.filename,
-        }));
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
         const chunks =
@@ -542,7 +571,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         let firstId: string | undefined;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
-          const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
+          const attachFiles = i === 0 && fileUploads.length > 0;
           const result = await adapter.postMessage(
             tid,
             attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
@@ -550,12 +579,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           if (i === 0) firstId = result?.id;
         }
         return firstId;
-      } else if (message.files && message.files.length > 0) {
+      } else if (fileUploads.length > 0) {
         // Files only, no text
-        const fileUploads = message.files.map((f: { data: Buffer; filename: string }) => ({
-          data: f.data,
-          filename: f.filename,
-        }));
         const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
         return result?.id;
       }

@@ -9,6 +9,7 @@ import { log } from '../log.js';
 import { createChatSdkBridge, setForwardedInteractionRouter, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { registerSlashCommandsWithDiscord, routeForwardedInteraction } from './discord-interactions.js';
+import { renderOutboundTables } from './discord-features/table-outbound.js';
 // Feature modules self-register their slash commands / component handlers on
 // import (side-effect), populating the interaction registry before
 // registerSlashCommandsWithDiscord runs below.
@@ -50,6 +51,9 @@ registerChannelAdapter('discord', {
       botToken,
       extractReplyContext,
       supportsThreads: true,
+      // Render CJK markdown tables to PNG attachments so wide glyphs don't
+      // misalign (additive module via the generic transformOutboundMessage seam).
+      transformOutboundMessage: renderOutboundTables,
     });
   },
 });
