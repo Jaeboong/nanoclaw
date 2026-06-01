@@ -27,6 +27,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
+import { startStatusLine, stopStatusLine } from './modules/status-line/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
@@ -500,13 +501,17 @@ async function deliverToAgent(
       event.threadId,
       mg.instance,
     );
+    startStatusLine(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
     const freshSession = getSession(session.id);
     if (freshSession) {
       const woke = await wakeContainer(freshSession);
       // wakeContainer never throws — it returns false on transient spawn
       // failure (host-sweep retries). Stop the typing indicator we just
       // started so it doesn't leak; the inbound row stays pending.
-      if (!woke) stopTypingRefresh(freshSession.id);
+      if (!woke) {
+        stopTypingRefresh(freshSession.id);
+        stopStatusLine(freshSession.id);
+      }
     }
   }
 }

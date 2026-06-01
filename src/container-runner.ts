@@ -31,6 +31,7 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
+import { stopStatusLine } from './modules/status-line/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -196,6 +197,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    stopStatusLine(session.id);
     // code null = killed by signal (normal shutdown path), not a boot failure.
     if (code !== 0 && code !== null && stderrTail.length > 0) {
       log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, stderrTail });
@@ -208,6 +210,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    stopStatusLine(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
 }
