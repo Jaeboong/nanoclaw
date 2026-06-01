@@ -73,3 +73,40 @@ through a generic seam costs nothing at merge time.
 - **Wiring:** `src/channels/discord.ts` (already a fork/skill file) calls
   `setForwardedInteractionRouter(routeForwardedInteraction)` and fires REST
   registration — a few lines in a non-core file.
+
+## Worked example — collab + responder (Task 9)
+
+재붕봇(Claude)↔나붕봇(Codex) bounded collaboration and the per-channel
+responder toggle. The two bots are separate Discord identities, so they hand
+off via channel messages (Claude's turn is host-injected; Codex's is observed).
+
+- **Module:** `src/modules/collab/` — `state.ts` (pure state machine, ported
+  from the v1 fork), `responder.ts` (pure), `db.ts` (module-owned tables),
+  `index.ts` (slash commands + router interceptor). Slash commands register via
+  the Task 7 framework; the interceptor records Codex turns and drives Claude
+  turns by injecting a framed prompt as a synthetic inbound message (re-uses
+  normal routing for session/gate/typing/wake — no duplicated host logic).
+- **Migration:** `src/db/migrations/module-collab-state.ts` — `collab_sessions`
+  + `responder_state`, keyed by `messaging_group_id`. Module-owned; additive.
+- **Core seam:** `router.ts` gains an additive `registerMessageInterceptor()`
+  registry **alongside** the existing single-slot `setMessageInterceptor` (left
+  byte-for-byte untouched, so the permissions module's call doesn't conflict on
+  future pulls) plus a 3-line loop in `routeInbound` that runs the registered
+  interceptors after the single-slot one. Upstream-PR candidate: a
+  silently-overwriting single slot is a latent bug the moment a second module
+  wants the hook. No Discord/collab identifier in core.
+- **Known divergence / fidelity gaps (deliberate):**
+  - *Claude DONE/BLOCKED not captured.* "flip-on-dispatch" models Claude's turn
+    as an assumed CONTINUE (round++/next→codex) so alternation and round-counting
+    stay correct without observing Claude's outbound. A Claude-initiated DONE
+    therefore doesn't end the session early — it runs to max-rounds (bounded).
+    Capturing it needs an outbound observer seam or a container-reported signal;
+    deferred as a separate decision.
+  - *Accumulate gap.* When the interceptor consumes a message (responder=codex,
+    or non-protocol chatter during Codex's turn) it returns true, so the message
+    is not stored as trigger=0 context. Benign for collab (each agent sees the
+    preceding turn via the injected prompt).
+  - *Channel-level only.* Collab injects at the channel (threadId from the peer
+    turn / null at kickoff); thread-scoped collab collapses to the channel.
+  - *otherBotMention suppression dropped* — v2 inbound carries no
+    `mentioned_bot_ids`; responder=codex covers the same intent explicitly.
