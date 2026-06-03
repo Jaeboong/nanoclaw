@@ -135,3 +135,58 @@ off via channel messages (Claude's turn is host-injected; Codex's is observed).
     turn / null at kickoff); thread-scoped collab collapses to the channel.
   - *otherBotMention suppression dropped* — v2 inbound carries no
     `mentioned_bot_ids`; responder=codex covers the same intent explicitly.
+
+## Worked example — background spawn_subagent (Task 15)
+
+Long, slow work (deploys, big research) run in a SEPARATE isolated container that
+survives the parent's turn and posts its result back to the origin channel — the
+v2 port of the v1 fork's `spawn_subagent`. Distinct from the SDK-native Agent/Task
+tool (in-process sub-agents that die with the parent container): only this gives a
+detached, survives-parent worker.
+
+- **Module:** `src/modules/background-spawn/` — `handler.ts`
+  (`handleSpawnSubagent`), `index.ts` (`registerDeliveryAction('spawn_subagent')`).
+  Container tool: `container/agent-runner/src/mcp-tools/background-spawn.ts`
+  (`spawn_subagent(prompt)` writes a `kind='system'` `{action:'spawn_subagent'}`
+  outbound row).
+- **Core seams used (no new seam, no inline edit):** the existing
+  `registerDeliveryAction` registry routes the system action to the module; the
+  handler composes existing primitives only — `createSession`,
+  `initSessionFolder`, `writeSessionMessage`, `wakeContainer`, `getMessagingGroup`,
+  `getSessionsByAgentGroup`, `updateSession`.
+- **Core touches (ledger):** two side-effect imports only —
+  `src/modules/index.ts` (+1) and `container/agent-runner/src/mcp-tools/index.ts`
+  (+1). No core logic edited.
+- **Routing-collision avoidance (the load-bearing design):** the worker session
+  reuses the parent's `agent_group_id` but sets `messaging_group_id = NULL`, so
+  `findSessionForAgent(agent, channel, thread)` never matches it — the parent
+  keeps owning the channel's inbound. The task is injected as an inbound stamped
+  with the origin channel routing + the parent's thread, so the worker's reply
+  resolves (via `resolveDestinationThread`, reading the inbound) to the origin
+  channel/thread. Authorization + addressability to the origin both ride the
+  channel's `agent_destinations` wiring row (shared agent_group) — `delivery.ts`
+  ACL passes via that row since `isOriginChat` is false for a `mg=null` session.
+  Proven end-to-end without a live container by `spawn-pattern.test.ts`.
+- **Lifecycle:** the worker stays `active` (the 60s sweep is its reliable delivery
+  safety net; re-drains are idempotent). Finished workers (container exited) are
+  reaped to `closed` on the next spawn, guarded by a `created_at` age check so a
+  concurrent spawn can't reap a still-booting sibling.
+- **Known gaps (deliberate / deferred):**
+  - *Cross-group targeting dropped* — v1's `spawn_subagent(target_jid)` could aim
+    another group; v2 always runs the worker against the parent's own
+    agent_group + origin channel (self-scoped, simpler, no ACL surface).
+  - *A lone never-followed-up worker lingers as `active`* until the next spawn
+    reaps it — harmless (idempotent re-sweep, `mg=null` so no inbound routes to
+    it), just untidy.
+  - *No concurrency bound (real regression vs v1, deferred system-wide).* The
+    handler wakes the worker unconditionally — the same as every other v2 wake
+    path (router, host-sweep, scheduling, …). NB: v2 has **no** global container
+    cap today (`MAX_CONCURRENT_CONTAINERS` is declared but never read), so this
+    matches the rest of the system, **but** `spawn_subagent` is the one
+    *agent-controllable* trigger — an agent can emit N spawns in a single turn,
+    whereas other triggers are externally rate-limited (one per message / tick /
+    approval). v1 gated this via `GroupQueue.enqueueParallelTask`. A real but
+    non-blocking gap: a module-local gate is useless (the sweep re-wakes with no
+    check), so the fix is a core concurrency gate inside `wakeContainer`/the
+    sweep touching all callers — a system-wide follow-up, not an additive
+    per-module change.

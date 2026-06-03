@@ -9,6 +9,7 @@ import './core.js';
 import './scheduling.js';
 import './interactive.js';
 import './agents.js';
+import './background-spawn.js';
 import './self-mod.js';
 import { startMcpServer } from './server.js';
 

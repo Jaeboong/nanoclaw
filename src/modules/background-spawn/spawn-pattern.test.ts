@@ -87,7 +87,11 @@ function spawnWorker(prompt: string): Session {
     thread_id: null,
     agent_provider: null,
     status: 'active',
-    container_status: 'idle', // appears in getRunningSessions (active poll)
+    // The real handler creates the worker 'stopped' and wakeContainer flips it
+    // to 'running'; 'idle' here simulates that post-wake state so the active-poll
+    // (getRunningSessions) assertion below also exercises. Delivery does not
+    // depend on it: the 60s sweep uses getActiveSessions (status only).
+    container_status: 'idle',
     last_active: null,
     created_at: now(),
   };
