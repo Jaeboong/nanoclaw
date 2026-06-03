@@ -13,14 +13,21 @@
  *     as a synthetic inbound message (id-prefixed `collab-inject-`) and let
  *     normal routing wake Claude's container. The framing is inbound (container
  *     input), so it never appears in the Discord channel.
- *   - Codex's turn is *observed*: 나붕봇 posts a reply ending with a
- *     `COLLAB_STATUS:` line; the interceptor records it.
- *   - "flip-on-dispatch": dispatching Claude's turn is modelled as an assumed
- *     `CONTINUE` (round++, next→codex) so round-counting and alternation stay
- *     correct *without observing Claude's own output*. Capturing Claude's own
- *     DONE/BLOCKED is a separate refinement (needs an outbound observer or a
- *     container-reported signal) — until then a Claude-initiated DONE just runs
- *     the session to max-rounds. Documented divergence (docs/UPSTREAM-MERGE.md).
+ *   - Claude's turn is *recorded from its own output*: when Claude's reply is
+ *     delivered, the outbound observer (observeClaudeTurn, via the additive
+ *     `registerOutboundObserver` seam) parses its real `COLLAB_STATUS` and
+ *     advances/completes/blocks the session. This mirrors v1's
+ *     recordClaudeCollabTurnIfNeeded — a Claude-initiated DONE/BLOCKED ends the
+ *     session faithfully (no assumed-CONTINUE).
+ *   - Codex's turn is *observed* on inbound: 나붕봇 posts a reply ending with a
+ *     `COLLAB_STATUS:` line; the interceptor records it (is-bot guarded, per
+ *     v1's is_bot_message).
+ *
+ * Peer-bot ingestion depends on the Chat SDK's webhook-forward gateway mode
+ * (v2's default): the SDK filters only `isMe` (self), so the peer bot's
+ * messages reach this interceptor while Claude's own output does not loop back
+ * as inbound (it's recorded via the outbound observer instead). The legacy
+ * gateway path would drop all bot messages — collab requires webhook-forward.
  *
  * Accumulate gap: when the interceptor consumes a message (responder=codex, or
  * non-protocol chatter during Codex's turn) it returns true, so the message is
@@ -28,7 +35,7 @@
  * the preceding turn via the injected prompt). Recorded in the ledger.
  */
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { getDeliveryAdapter } from '../../delivery.js';
+import { getDeliveryAdapter, registerOutboundObserver, type OutboundObservation } from '../../delivery.js';
 import { log } from '../../log.js';
 import { registerMessageInterceptor, routeInbound } from '../../router.js';
 import {
@@ -38,7 +45,6 @@ import {
   type SlashResult,
 } from '../../channels/discord-interactions.js';
 import type { InboundEvent } from '../../channels/adapter.js';
-import type { MessagingGroup } from '../../types.js';
 
 import {
   getActiveCollabSession,
@@ -68,17 +74,39 @@ const INJECT_PREFIX = 'collab-inject-';
 interface ParsedContent {
   readonly text?: string;
   readonly senderId?: string;
+  /** Whether the message is from a bot, e.g. the peer 나붕봇. Nested under
+   *  `author` by the Chat SDK serialization (toJSON), NOT projected to the
+   *  top level the way senderId is — read it from `author.isBot`. */
+  readonly isBot?: boolean;
 }
 
 function safeParseContent(raw: string): ParsedContent {
   try {
     const v = JSON.parse(raw) as Record<string, unknown>;
+    const author = v.author as Record<string, unknown> | undefined;
     return {
       text: typeof v.text === 'string' ? v.text : undefined,
       senderId: typeof v.senderId === 'string' ? v.senderId : undefined,
+      isBot: typeof author?.isBot === 'boolean' ? author.isBot : undefined,
     };
   } catch {
     return { text: raw };
+  }
+}
+
+/**
+ * Extract the deliverable body from an outbound message's content. Mirrors the
+ * bridge's `deliver()` (chat-sdk-bridge.ts): `markdown || text`. The agent
+ * runner writes `{ text: body }`; the `markdown` fallback covers other paths.
+ */
+function extractOutboundText(rawContent: string): string {
+  try {
+    const v = JSON.parse(rawContent) as Record<string, unknown>;
+    if (typeof v.markdown === 'string') return v.markdown;
+    if (typeof v.text === 'string') return v.text;
+    return '';
+  } catch {
+    return '';
   }
 }
 
@@ -127,32 +155,31 @@ async function injectCollabPrompt(params: {
 }
 
 /**
- * Model Claude taking its turn: round++, flip next→codex (assumed CONTINUE),
- * persist, and inject the framed turn prompt. `conversation` is the text Claude
- * should act on (the kickoff text, or the peer bot's last turn).
+ * Dispatch Claude's turn by injecting the framed turn prompt. Does NOT record
+ * the turn — Claude's actual turn (and its DONE/BLOCKED) is recorded later by
+ * the outbound observer when Claude's reply is delivered (see observeClaudeTurn).
+ * This mirrors v1, which records Claude's turn from its own output, not at
+ * dispatch time. `conversation` is the text Claude should act on (the kickoff
+ * text, or the peer bot's last turn). The prompt frames the *upcoming* round
+ * (`round + 1`) without mutating state.
  */
 async function dispatchClaudeTurn(
-  mg: MessagingGroup,
   platformId: string,
   threadId: string | null,
-  claudeTurnSession: CollabSession,
+  session: CollabSession,
   conversation: string,
   framedOverride?: string,
 ): Promise<void> {
-  const dispatched = applyAgentTurn(claudeTurnSession, 'claude', 'COLLAB_STATUS: CONTINUE');
-  const next = dispatched.session ?? claudeTurnSession;
-  upsertCollabSession(mg.id, next);
-
   const prompt =
     framedOverride ??
     buildCollabTurnPrompt({
       agent: 'claude',
-      task: next.task,
-      round: next.round,
-      maxRounds: next.maxRounds,
+      task: session.task,
+      round: session.round + 1,
+      maxRounds: session.maxRounds,
       conversation,
     });
-  await injectCollabPrompt({ platformId, threadId, senderId: next.startedBy, text: prompt });
+  await injectCollabPrompt({ platformId, threadId, senderId: session.startedBy, text: prompt });
 }
 
 // ── Router interceptor ────────────────────────────────────────────────────
@@ -166,19 +193,20 @@ export async function collabInterceptor(event: InboundEvent): Promise<boolean> {
   const mg = getMessagingGroupByPlatform('discord', event.platformId);
   if (!mg) return false;
 
-  const { text = '' } = safeParseContent(event.message.content);
+  const { text = '', isBot } = safeParseContent(event.message.content);
   const active = getActiveCollabSession(mg.id);
 
   if (active) {
     if (active.nextAgent === 'codex') {
-      // Awaiting the peer bot's turn. Record it iff it carries a protocol line.
-      if (hasExplicitCollabTurnStatus(text)) {
+      // Record the peer bot's turn iff it's a bot message (나붕봇) carrying a
+      // protocol line. The is-bot guard matches v1's is_bot_message check: a
+      // human typing a COLLAB_STATUS line during Codex's turn must not count.
+      if (isBot && hasExplicitCollabTurnStatus(text)) {
         const afterCodex = applyAgentTurn(active, 'codex', text);
         if (afterCodex.session) {
+          upsertCollabSession(mg.id, afterCodex.session);
           if (afterCodex.session.status === 'active' && afterCodex.session.nextAgent === 'claude') {
-            await dispatchClaudeTurn(mg, event.platformId, event.threadId, afterCodex.session, text);
-          } else {
-            upsertCollabSession(mg.id, afterCodex.session);
+            await dispatchClaudeTurn(event.platformId, event.threadId, afterCodex.session, text);
           }
           log.info('Collab codex turn recorded', {
             messagingGroupId: mg.id,
@@ -193,8 +221,9 @@ export async function collabInterceptor(event: InboundEvent): Promise<boolean> {
       // must not separately respond while it isn't its turn.
       return true;
     }
-    // nextAgent === 'claude': transient (we drive Claude via injection). Suppress
-    // any raw inbound so only the driven turn engages.
+    // nextAgent === 'claude': Claude is driven by injection and its turn is
+    // recorded from its own delivered output (observeClaudeTurn). Suppress raw
+    // inbound so only the driven turn engages.
     return true;
   }
 
@@ -204,6 +233,47 @@ export async function collabInterceptor(event: InboundEvent): Promise<boolean> {
 }
 
 registerMessageInterceptor(collabInterceptor);
+
+// ── Outbound observer: record Claude's own turn from its delivered reply ────
+
+/**
+ * Record Claude's collab turn from its own delivered output — the v2 analogue
+ * of v1's `recordClaudeCollabTurnIfNeeded` (which observed the container's
+ * outbound stream). Fired by the delivery layer after Claude's reply lands.
+ *
+ * Guarded on an explicit `COLLAB_STATUS` line: the agent writes one
+ * messages_out row per `<message to="">` block, so a turn can span multiple
+ * rows — recording the status-bearing row (rather than blindly defaulting the
+ * first row to CONTINUE) keeps a late DONE/BLOCKED from being missed. If Claude
+ * omits the protocol line entirely the turn won't auto-record and the session
+ * waits on Claude's turn; the turn prompt mandates exactly one such line.
+ *
+ * Runs synchronously (better-sqlite3): the `nextAgent` flip commits before this
+ * delivery returns. The peer bot's reply is causally later — 나붕봇 can't post it
+ * until Claude's message has been delivered to Discord — so by the time that
+ * reply routes inbound, this flip is already committed and visible.
+ */
+export function observeClaudeTurn(msg: OutboundObservation): void {
+  if (msg.channelType !== 'discord') return;
+  const mg = getMessagingGroupByPlatform('discord', msg.platformId);
+  if (!mg) return;
+  const session = getActiveCollabSession(mg.id);
+  if (!session || session.nextAgent !== 'claude') return;
+  const text = extractOutboundText(msg.content);
+  if (!text || !hasExplicitCollabTurnStatus(text)) return;
+  const result = applyAgentTurn(session, 'claude', text);
+  if (!result.session) return;
+  upsertCollabSession(mg.id, result.session);
+  log.info('Collab claude turn recorded', {
+    messagingGroupId: mg.id,
+    reason: result.reason,
+    status: result.session.status,
+    nextAgent: result.session.nextAgent,
+    round: result.session.round,
+  });
+}
+
+registerOutboundObserver(observeClaudeTurn);
 
 // ── Slash commands ────────────────────────────────────────────────────────
 
@@ -223,7 +293,6 @@ async function handleCollab(inv: SlashInvocation): Promise<SlashResult> {
   if (starter === 'claude') {
     // Drive Claude's first turn: kickoff framing as the conversation.
     await dispatchClaudeTurn(
-      mg,
       inv.platformId,
       null,
       session,

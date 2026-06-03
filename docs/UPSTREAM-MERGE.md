@@ -83,25 +83,50 @@ off via channel messages (Claude's turn is host-injected; Codex's is observed).
 - **Module:** `src/modules/collab/` — `state.ts` (pure state machine, ported
   from the v1 fork), `responder.ts` (pure), `db.ts` (module-owned tables),
   `index.ts` (slash commands + router interceptor). Slash commands register via
-  the Task 7 framework; the interceptor records Codex turns and drives Claude
-  turns by injecting a framed prompt as a synthetic inbound message (re-uses
-  normal routing for session/gate/typing/wake — no duplicated host logic).
+  the Task 7 framework; the interceptor records Codex turns (inbound) and drives
+  Claude turns by injecting a framed prompt as a synthetic inbound message
+  (re-uses normal routing for session/gate/typing/wake — no duplicated host
+  logic). Claude's own turn is recorded from its delivered output via
+  `observeClaudeTurn` (outbound observer) — the v2 analogue of v1's
+  `recordClaudeCollabTurnIfNeeded`, so a Claude-initiated DONE/BLOCKED ends the
+  session faithfully.
 - **Migration:** `src/db/migrations/module-collab-state.ts` — `collab_sessions`
   + `responder_state`, keyed by `messaging_group_id`. Module-owned; additive.
-- **Core seam:** `router.ts` gains an additive `registerMessageInterceptor()`
-  registry **alongside** the existing single-slot `setMessageInterceptor` (left
-  byte-for-byte untouched, so the permissions module's call doesn't conflict on
-  future pulls) plus a 3-line loop in `routeInbound` that runs the registered
-  interceptors after the single-slot one. Upstream-PR candidate: a
-  silently-overwriting single slot is a latent bug the moment a second module
-  wants the hook. No Discord/collab identifier in core.
+- **Core seams (two, both additive registries beside existing ones):**
+  - `router.ts` — additive `registerMessageInterceptor()` registry **alongside**
+    the existing single-slot `setMessageInterceptor` (left byte-for-byte
+    untouched, so the permissions module's call doesn't conflict on future
+    pulls) plus a 3-line loop in `routeInbound` that runs the registered
+    interceptors after the single-slot one.
+  - `delivery.ts` — additive `registerOutboundObserver()` registry + a
+    read-only fire point in `deliverMessage` (after a successful channel
+    delivery, before `clearOutbox`). Mirrors the existing `registerDeliveryAction`
+    registry idiom. Observers are read-only, wrapped in try/catch, and run
+    synchronously (better-sqlite3): a collab turn's `nextAgent` flip commits
+    before the delivery returns. Inbound routing is async (fire-and-forget), but
+    a peer-bot reply is causally later than the delivery that fires the observer
+    (the peer can't reply before the message lands), so it reads the committed
+    flip. Fires once per delivered row
+    (delivered rows aren't re-drained → no double-count). No Discord/collab
+    identifier in core. Both are upstream-PR candidates: a silently-overwriting
+    single slot / a missing post-delivery observer hook are generic gaps.
+- **Peer-bot ingestion (resolved, was the open blocker):** the collab loop needs
+  나붕봇's (a bot's) messages to reach the interceptor. The Chat SDK's
+  webhook-forward gateway mode (v2 default — `chat-sdk-bridge.ts` starts a local
+  webhook server and passes `webhookUrl` to `startGatewayListener`) forwards bot
+  messages, and the SDK's `handleIncomingMessage` filters only `isMe` (self),
+  not `isBot`. So the peer bot is ingested while Claude's own output does **not**
+  loop back as inbound (recorded via the outbound observer instead). The *legacy*
+  gateway path drops all bot messages — collab depends on webhook-forward mode.
 - **Known divergence / fidelity gaps (deliberate):**
-  - *Claude DONE/BLOCKED not captured.* "flip-on-dispatch" models Claude's turn
-    as an assumed CONTINUE (round++/next→codex) so alternation and round-counting
-    stay correct without observing Claude's outbound. A Claude-initiated DONE
-    therefore doesn't end the session early — it runs to max-rounds (bounded).
-    Capturing it needs an outbound observer seam or a container-reported signal;
-    deferred as a separate decision.
+  - *Claude must end its turn with a `COLLAB_STATUS` line.* The agent writes one
+    `messages_out` row per `<message to="">` block, so a turn can span rows;
+    `observeClaudeTurn` records on the status-bearing row (guarded on
+    `hasExplicitCollabTurnStatus`) rather than defaulting the first row to
+    CONTINUE — this avoids missing a late DONE/BLOCKED. Cost vs v1: if Claude
+    omits the protocol line entirely the turn won't auto-record (v1's
+    final-result path would default it to CONTINUE). The turn prompt mandates
+    exactly one such line, so this is an error-path-only divergence.
   - *Accumulate gap.* When the interceptor consumes a message (responder=codex,
     or non-protocol chatter during Codex's turn) it returns true, so the message
     is not stored as trigger=0 context. Benign for collab (each agent sees the
