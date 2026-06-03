@@ -384,6 +384,16 @@ async function deliverMessage(
     fileCount: files?.length,
   });
 
+  // Read-only observers (e.g. collab turn recording). Fired once, after a
+  // successful delivery — delivered rows aren't re-drained, so no double-fire.
+  fireOutboundObservers({
+    channelType: msg.channel_type,
+    platformId: msg.platform_id,
+    threadId: msg.thread_id,
+    kind: msg.kind,
+    content: msg.content,
+  });
+
   clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
@@ -420,6 +430,45 @@ export function registerDeliveryAction(action: string, handler: DeliveryActionHa
 /** Look up a registered delivery-action handler. Lets module registrations be behavior-tested. */
 export function getDeliveryAction(action: string): DeliveryActionHandler | undefined {
   return actionHandlers.get(action);
+}
+
+/**
+ * Outbound observer registry (additive module seam — see docs/UPSTREAM-MERGE.md).
+ *
+ * Read-only observers fired once for each container-originated channel message
+ * AFTER it is successfully delivered. Observers must not mutate delivery and
+ * must not throw (errors are caught and logged). They run synchronously and
+ * commit (better-sqlite3) before delivery returns, so any state they write is
+ * durable for the next reader. (Inbound routing is async/fire-and-forget, but a
+ * reply that depends on this delivered message is causally later, so it reads
+ * the committed state.)
+ *
+ * Fired only for real channel deliveries — system actions and agent-to-agent
+ * routing return before the fire point, so observers never see internal traffic.
+ */
+export interface OutboundObservation {
+  readonly channelType: string;
+  readonly platformId: string;
+  readonly threadId: string | null;
+  readonly kind: string;
+  readonly content: string;
+}
+
+type OutboundObserver = (msg: OutboundObservation) => void;
+const outboundObservers: OutboundObserver[] = [];
+
+export function registerOutboundObserver(fn: OutboundObserver): void {
+  outboundObservers.push(fn);
+}
+
+function fireOutboundObservers(msg: OutboundObservation): void {
+  for (const observe of outboundObservers) {
+    try {
+      observe(msg);
+    } catch (err) {
+      log.error('Outbound observer threw', { err });
+    }
+  }
 }
 
 /**
