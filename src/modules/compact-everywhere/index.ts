@@ -10,9 +10,12 @@
  * `evaluateEngage`, so engage_mode is irrelevant — and injects it straight
  * into the channel's LIVE session via the session-targeted path
  * (`writeSessionMessage` → `wakeContainer`), mirroring background-spawn and
- * agent-to-agent. The slash's `requireAdmin` flag IS the trust boundary:
- * `handleSlash` enforces `isAdmin` before the handler runs, and this path
- * deliberately bypasses `gateCommand` (which lives only in `deliverToAgent`).
+ * agent-to-agent. The slash's `requireAdmin` flag is the framework pre-gate
+ * (`handleSlash` enforces `isAdmin` before the handler runs); because that gate
+ * resolves only the top-priority agent while this command fans out to all wired
+ * agents, the handler re-checks `isAdmin` per agent (see `handleCompactEverywhere`).
+ * This path deliberately bypasses `gateCommand` (which lives only in
+ * `deliverToAgent`), so those two checks are the whole authorization story.
  *
  * Additive: new module + 1 barrel import in src/modules/index.ts. Uses only
  * existing seams (`registerSlashCommand`, `findSessionForAgent`,
@@ -39,6 +42,7 @@ import {
   type SlashInvocation,
   type SlashResult,
 } from '../../channels/discord-interactions.js';
+import { isAdmin } from '../../command-gate.js';
 import { wakeContainer } from '../../container-runner.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { findSessionForAgent, getSession } from '../../db/sessions.js';
@@ -54,10 +58,17 @@ function injectId(): string {
 
 /**
  * Inject `/compact` into every LIVE channel-root session wired to the invoking
- * channel and wake its container. Returns an ephemeral confirmation.
+ * channel that the caller is authorized to compact, and wake its container.
+ * Returns an ephemeral confirmation.
  *
- * Authorization is already enforced by the framework: `requireAdmin: true`
- * makes `handleSlash` reject non-admins before this handler runs.
+ * Authorization is two-layer. The framework's `requireAdmin: true` makes
+ * `handleSlash` reject non-admins before this handler runs — but that gate
+ * resolves only the channel's TOP-PRIORITY agent. Because this command fans
+ * out to EVERY wired agent, we re-check `isAdmin` per agent here so a scoped
+ * admin compacts only the agents they administer (the same per-agent model the
+ * typed-command path enforces via `gateCommand`). A global owner/admin
+ * (user_roles row with `agent_group_id IS NULL`) passes every check; when the
+ * permissions module isn't installed, `isAdmin` allows all.
  */
 export async function handleCompactEverywhere(inv: SlashInvocation): Promise<SlashResult> {
   const mg = getMessagingGroupByPlatform('discord', inv.platformId);
@@ -65,6 +76,10 @@ export async function handleCompactEverywhere(inv: SlashInvocation): Promise<Sla
 
   let compacted = 0;
   for (const agent of getMessagingGroupAgents(mg.id)) {
+    // Per-agent authorization (see docstring) — the framework gate only
+    // checked the top-priority agent; skip agents this caller can't compact.
+    if (!isAdmin(inv.userId, agent.agent_group_id)) continue;
+
     // Channel ROOT session only (threadId=null), like collab. Non-creating:
     // `findSessionForAgent` (NOT `resolveSession`) so we never spin up an
     // empty session just to compact nothing.

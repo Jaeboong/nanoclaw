@@ -49,6 +49,8 @@ import {
 } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import type { Session } from '../../types.js';
+import { grantRole } from '../permissions/db/user-roles.js';
+import { upsertUser } from '../permissions/db/users.js';
 
 import './index.js'; // self-registers → fills `registered`
 
@@ -98,6 +100,18 @@ function seedChannel(agents: string[]): void {
   });
 }
 
+/** Seed an authorized user. `null` agentGroupId = global owner; else scoped admin. */
+function seedAdmin(userId: string, agentGroupId: string | null): void {
+  upsertUser({ id: userId, kind: 'discord', display_name: userId, created_at: now() });
+  grantRole({
+    user_id: userId,
+    role: agentGroupId === null ? 'owner' : 'admin',
+    agent_group_id: agentGroupId,
+    granted_by: null,
+    granted_at: now(),
+  });
+}
+
 function liveSession(agentGroupId: string, id = `sess-${agentGroupId}`): Session {
   const s: Session = {
     id,
@@ -119,6 +133,9 @@ beforeEach(() => {
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const db = initTestDb();
   runMigrations(db);
+  // Default invoker is a global owner so the per-agent isAdmin re-check passes
+  // for every wired agent. Scoped-admin behaviour is exercised separately.
+  seedAdmin('discord:admin', null);
   wakeContainerMock.mockClear();
   writeSessionMessageMock.mockClear();
 });
@@ -129,6 +146,10 @@ afterEach(() => {
 });
 
 describe('/compact-everywhere registration', () => {
+  // This asserts the wiring (the flag is passed). The framework's actual
+  // requireAdmin ENFORCEMENT is covered at its own seam in
+  // discord-interactions.test.ts (handleSlash rejects non-admins pre-handler);
+  // here handleSlash is mocked away, so this is not end-to-end auth coverage.
   it('registers a deferred, admin-gated /compact slash command', () => {
     expect(registered.def?.name).toBe('compact');
     expect(registered.def?.requireAdmin).toBe(true);
@@ -148,10 +169,19 @@ describe('/compact-everywhere handler', () => {
     const [agId, sessId, msg] = writeSessionMessageMock.mock.calls[0] as [
       string,
       string,
-      { id: string; trigger: number; platformId: string; channelType: string; threadId: string | null; content: string },
+      {
+        id: string;
+        kind: string;
+        trigger: number;
+        platformId: string;
+        channelType: string;
+        threadId: string | null;
+        content: string;
+      },
     ];
     expect(agId).toBe('ag-1');
     expect(sessId).toBe(s.id);
+    expect(msg.kind).toBe('chat'); // locks the host→container isRunnerCommand contract
     expect(msg.trigger).toBe(1);
     expect(msg.platformId).toBe(PLATFORM);
     expect(msg.channelType).toBe('discord');
@@ -197,5 +227,20 @@ describe('/compact-everywhere handler', () => {
     expect(writeSessionMessageMock).toHaveBeenCalledTimes(2);
     expect(wakeContainerMock).toHaveBeenCalledTimes(2);
     expect(res.text).toContain('2개 세션');
+  });
+
+  it('per-agent gate: a scoped admin compacts only the agent they administer', async () => {
+    seedChannel(['ag-1', 'ag-2']);
+    liveSession('ag-1', 'sess-1');
+    liveSession('ag-2', 'sess-2');
+    seedAdmin('discord:scoped', 'ag-1'); // admin of ag-1 only, not ag-2
+
+    const res = await registered.handler!(invocation({ userId: 'discord:scoped' }));
+
+    expect(writeSessionMessageMock).toHaveBeenCalledTimes(1);
+    expect(writeSessionMessageMock.mock.calls[0][0]).toBe('ag-1');
+    expect(wakeContainerMock).toHaveBeenCalledTimes(1);
+    expect(wakeContainerMock.mock.calls[0][0].id).toBe('sess-1');
+    expect(res.text).toContain('1개 세션');
   });
 });

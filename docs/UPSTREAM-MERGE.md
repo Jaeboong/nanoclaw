@@ -212,11 +212,18 @@ delivered over the gateway-forward interaction path and never touches
   `writeSessionMessage`, `wakeContainer`.
 - **Core touches (ledger):** one side-effect import only — `src/modules/index.ts`
   (+1, `import './compact-everywhere/index.js';`). No core logic edited.
-- **Authorization (the trust boundary):** `requireAdmin: true` makes
-  `handleSlash` enforce `isAdmin(userId, agentGroupId)` *before* the handler
-  runs. This path deliberately bypasses `gateCommand` (which lives only in
-  `deliverToAgent` on the chat-message path), so the slash gate is the sole and
-  sufficient check — and it is enforced pre-inject.
+- **Authorization (two layers):** `requireAdmin: true` makes `handleSlash`
+  enforce `isAdmin` *before* the handler runs — but that framework gate resolves
+  only the channel's **top-priority** agent (`getMessagingGroupAgents(mg.id)[0]`,
+  `ORDER BY priority DESC`). Because this command fans out to **every** wired
+  agent, the handler **re-checks `isAdmin(inv.userId, agent.agent_group_id)` per
+  agent** inside the loop and skips agents the caller isn't admin of — matching
+  the per-agent model the typed-command path enforces via `gateCommand` (which
+  this session-targeted path deliberately bypasses). A global owner/admin
+  (`agent_group_id IS NULL`) passes every check; the framework's single-agent
+  pre-gate means a *scoped* admin of a non-top-priority agent is denied entry
+  (a benign framework-tier quirk shared by all `requireAdmin` slashes). Net: no
+  over-grant (the per-agent re-check is authoritative), enforced pre-inject.
 - **Inject (session-targeted, bypasses engage):** resolve the channel's LIVE
   session with the non-creating `findSessionForAgent` (NOT `resolveSession`,
   which would spin up an empty session and leak a wake just to compact nothing),

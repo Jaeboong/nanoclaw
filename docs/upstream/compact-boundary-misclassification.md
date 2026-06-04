@@ -44,9 +44,10 @@ consequences follow from this one misclassification:
 
 ## Trigger frequency
 
-- **Manual `/compact`:** confirmed. The compaction is the whole turn, so the
-  `compact_boundary` result is the only output → `hasUnwrapped` true → nudge
-  fires (`unwrappedNudged` resets per turn at poll-loop ~L380).
+- **Manual `/compact`:** confirmed by path analysis. The compaction is the
+  whole turn, so the `compact_boundary` result is the only output →
+  `hasUnwrapped` true → nudge fires (`unwrappedNudged` resets per turn at
+  poll-loop ~L380). (Code-traced, not runtime-observed — see the note below.)
 - **Automatic compaction** (at `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, default
   165000): likely but unconfirmed. `compact_boundary` arrives mid-stream
   alongside a real wrapped result; whether the bare-text result is processed in

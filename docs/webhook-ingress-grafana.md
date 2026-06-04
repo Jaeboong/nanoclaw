@@ -42,7 +42,8 @@ A single self-contained file, `src/webhook-server.ts`, exporting
   capability.
 - v2 **already has** a `src/webhook-server.ts`, but it is a *different* feature —
   the Chat SDK adapter webhook router on `:3000` (`/webhook/{adapterName}`).
-  A new alert ingress must **not** overwrite or mount onto it.
+  A new alert ingress must **not** overwrite or mount onto it. (Its port is
+  `WEBHOOK_PORT`, default 3000 — distinct from the `INGRESS_PORT` below.)
 - v2's intake model is session/thread-based (`messaging_groups`/`agent_groups`,
   `src/db/sessions.ts`), with no `storeMessage`/`registered_groups`. The v1 inject
   primitive does not exist; the inject must be rebuilt against v2 seams.
