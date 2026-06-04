@@ -190,3 +190,59 @@ detached, survives-parent worker.
     check), so the fix is a core concurrency gate inside `wakeContainer`/the
     sweep touching all callers — a system-wide follow-up, not an additive
     per-module change.
+
+## Worked example — /compact-everywhere (Task 10)
+
+Uniform `/compact` in **every** channel. v2 dispatches a typed `/compact` only
+where the chat message engages — is_main channels (engage_mode `pattern='.'`)
+and admin-gated typed commands. In the mention/pattern sub-channels a bare typed
+`/compact` is dropped by `evaluateEngage` before it reaches a session. This
+module exposes `/compact` as a Discord-native **slash command**, which is
+delivered over the gateway-forward interaction path and never touches
+`routeInbound`/`evaluateEngage`, so engage_mode is structurally irrelevant.
+
+- **Module:** `src/modules/compact-everywhere/` — `index.ts`
+  (`handleCompactEverywhere` + `registerSlashCommand('compact', …)`),
+  `index.test.ts` (6 behaviour tests on the real DB layer, I/O boundaries
+  mocked).
+- **Core seams used (no new seam, no inline edit):** the existing Task 7
+  `registerSlashCommand` registry (`requireAdmin: true`, `deferred: true`); the
+  handler composes existing primitives only — `getMessagingGroupByPlatform`,
+  `getMessagingGroupAgents`, `findSessionForAgent`, `getSession`,
+  `writeSessionMessage`, `wakeContainer`.
+- **Core touches (ledger):** one side-effect import only — `src/modules/index.ts`
+  (+1, `import './compact-everywhere/index.js';`). No core logic edited.
+- **Authorization (the trust boundary):** `requireAdmin: true` makes
+  `handleSlash` enforce `isAdmin(userId, agentGroupId)` *before* the handler
+  runs. This path deliberately bypasses `gateCommand` (which lives only in
+  `deliverToAgent` on the chat-message path), so the slash gate is the sole and
+  sufficient check — and it is enforced pre-inject.
+- **Inject (session-targeted, bypasses engage):** resolve the channel's LIVE
+  session with the non-creating `findSessionForAgent` (NOT `resolveSession`,
+  which would spin up an empty session and leak a wake just to compact nothing),
+  then `writeSessionMessage({text:'/compact'}, trigger:1)` stamped with the
+  origin routing + `wakeContainer`. Warm container: the poll loop sees
+  `isRunnerCommand`, ends the stream, and the outer loop re-dispatches `/compact`
+  as a fresh query's first input (native SDK compaction). Mirrors
+  background-spawn / agent-to-agent.
+- **Known gaps (deliberate / deferred):**
+  - *Channel-root only.* A slash invoked inside a Discord thread carries the
+    thread id as `channel_id`, so `platformId` becomes `discord:{guild}:{thread}`
+    and matches no messaging group → the command reports "not wired". Full
+    per-thread coverage needs extending the Task 7 `RawDiscordInteraction` shape
+    to read `channel.parent_id` + `channel.type` — a core seam touch beyond this
+    module's +1-import budget. Invoke `/compact` from the channel root.
+  - *Native-provider only.* `/compact` compacts only on a provider whose runner
+    treats it as a native slash command (claude); a non-native session degrades
+    to a silent container-side no-op. Not exercised in this fork — all wired
+    agent sessions are Claude (codex is only a collab peer, never a wired
+    session).
+  - *Upstream ack defect (out of scope, see `docs/upstream/compact-boundary-misclassification.md`).*
+    After compaction the SDK's `compact_boundary` is mapped to a `result`-with-text
+    event, which `dispatchResultText` treats as a failed unwrapped agent turn:
+    the "Context compacted" confirmation is swallowed and a spurious "response not
+    delivered" nudge is pushed to the agent. This is in **upstream-core**
+    (`claude.ts`/`poll-loop.ts`, byte-identical to `upstream/main`), so it is
+    reported upstream rather than fork-patched. `/compact-everywhere`'s own
+    ephemeral slash reply ("압축을 요청했습니다") is unaffected — it confirms the
+    request landed regardless of the in-container ack defect.
