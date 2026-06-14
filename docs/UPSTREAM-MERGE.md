@@ -253,3 +253,62 @@ delivered over the gateway-forward interaction path and never touches
     reported upstream rather than fork-patched. `/compact-everywhere`'s own
     ephemeral slash reply ("압축을 요청했습니다") is unaffected — it confirms the
     request landed regardless of the in-container ack defect.
+
+## Worked example — agent-activity panel (Task 11)
+
+Interactive Discord panel (`/agents`) showing live agent work-activity: which
+sessions are active, which containers are live, and the tool each is running
+right now. **First consumer of the Task 7 `registerComponentHandler` seam.**
+Jira/GitLab dropped (the v1 "work-ledger" was a Jira/GitLab console — out, same
+call as the Grafana webhook in `docs/webhook-ingress-grafana.md`).
+
+- **Module:** `src/modules/agent-activity/` — `index.ts` (slash `/agents` + two
+  component handlers `work:refresh` / `work:details`, each admin self-gating),
+  `snapshot.ts` (liveness-gated N+1 read assembling
+  `{agentName, sessionId, chat, currentTool, elapsed, status}` from
+  `getActiveSessions` + `isContainerRunning` + `getContainerState`),
+  `render.ts` (pure summary/compact/detail text, budget-clamped). Additive,
+  owns no tables, reads only existing DBs.
+- **Core seam (one, generic, in the bridge):** `chat-sdk-bridge.ts` — the
+  `content.type === 'card'` deliver() branch now renders a callback
+  `Button({id,label,value:id})` for a card action that carries an `id` (no
+  `url`), beside the existing `LinkButton` (url) path. Generic (no
+  fork/Discord/`work:` identifier — renders whatever id it's given, knows no
+  prefixes), ~12 lines, reuses the `Card`/`Button`/`Actions` builders already
+  imported (the `ncq:` branch uses them). Same file + same seam tier as Task 7's
+  `setForwardedInteractionRouter`. Upstream-PR candidate: before Task 7 a
+  non-URL action button had nowhere to land; after Task 7 it does, so
+  `send_card`-style posts can finally carry one. (Added two type-only imports —
+  `ButtonElement`, `LinkButtonElement` — to type the mixed button array, because
+  `ReturnType<typeof Button>` resolves to the overload's `ChatElement`.)
+- **Core touches (ledger):** one side-effect import — `src/modules/index.ts`
+  (+1) — plus the one bridge-card-action seam above. No other core edit.
+- **Authorization:** slash framework-gated (`requireAdmin: true` → `handleSlash`
+  `isAdmin`). Component handlers are framework-UNGATED (the known Task 7 gap —
+  `handleComponent` runs no auth), so each handler re-checks
+  `isAdmin(inv.userId, resolveAgentGroupId(inv.platformId))` itself —
+  channel-agent basis, symmetric with the slash gate (the same per-handler
+  re-check compact-everywhere uses).
+- **Refresh model — ephemeral views, NOT in-place edit (load-bearing, verified
+  against `@chat-adapter/discord@4.26.0`):** a card always renders as message
+  `content` (`cardToFallbackText`) + an embed + a component row, and
+  `ComponentResult.update` can only PATCH `content`, never the embed. So a
+  button cannot refresh the embedded snapshot in place. The public card is
+  therefore a compact at-post-time **summary** (header + counts), and the
+  buttons deliver the live per-session detail as **ephemeral followups** (plain
+  content — no embed, no duplication, no stale board). Re-run `/agents` for a
+  fresh public summary.
+- **Known gaps (deliberate / deferred):**
+  - *No live in-place public board.* Updating the public embed on a click needs
+    a SECOND core seam — extend `ComponentResult.update` + `handleComponent` to
+    carry an embed/card payload (and re-render it). Deferred to a future task
+    that owns that seam; out of this module's one-seam budget.
+  - *No per-session control (stop/pause/select).* A session-keyed control set
+    must change as the session list changes, which needs `ComponentResult` to
+    SET a new components array (Task 7 cannot — `handleComponent` only clears
+    components). Same second-seam dependency; deferred. Task 11 is a read-only
+    viewer.
+  - *Stale `container_state` defended, not fixed.* `container_state` is never
+    cleared on container crash/kill; the snapshot gates every tool read on
+    `isContainerRunning`, so a dead container shows `⚫ 중지됨`, not a phantom
+    tool. The underlying stale row is a v2 issue this module works around.

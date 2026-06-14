@@ -27,3 +27,4 @@ import './self-mod/index.js';
 import './collab/index.js';
 import './background-spawn/index.js';
 import './compact-everywhere/index.js';
+import './agent-activity/index.js';

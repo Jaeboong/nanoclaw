@@ -13,6 +13,8 @@ import {
   Actions,
   Button,
   LinkButton,
+  type ButtonElement,
+  type LinkButtonElement,
   type CardChild,
   type Adapter,
   type ConcurrencyStrategy,
@@ -526,20 +528,26 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           }
         }
         if (Array.isArray(cardSpec.actions)) {
-          const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
-            .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
-            .map((a) => {
-              const style = a.style;
-              const safeStyle: 'primary' | 'danger' | 'default' | undefined =
-                style === 'primary' || style === 'danger' || style === 'default' ? style : undefined;
-              return LinkButton({
-                label: a.label as string,
-                url: a.url as string,
-                style: safeStyle,
-              });
-            });
-          if (linkButtons.length > 0) {
-            cardChildren.push(Actions(linkButtons));
+          // A `url` action renders as a fire-and-forget link button; an `id`
+          // action (no url) renders as a callback button that lands via the
+          // forwarded-interaction router (post-Task7, registered component
+          // handlers give these somewhere to go). Generic — the bridge renders
+          // whatever id/url it's given and knows no prefixes.
+          const buttons: Array<ButtonElement | LinkButtonElement> = [];
+          for (const a of cardSpec.actions as Array<Record<string, unknown>>) {
+            const label = typeof a.label === 'string' ? a.label : '';
+            if (!label) continue;
+            const style = a.style;
+            const safeStyle: 'primary' | 'danger' | 'default' | undefined =
+              style === 'primary' || style === 'danger' || style === 'default' ? style : undefined;
+            if (typeof a.url === 'string' && a.url) {
+              buttons.push(LinkButton({ label, url: a.url, style: safeStyle }));
+            } else if (typeof a.id === 'string' && a.id) {
+              buttons.push(Button({ id: a.id, label, value: a.id, style: safeStyle }));
+            }
+          }
+          if (buttons.length > 0) {
+            cardChildren.push(Actions(buttons));
           }
         }
 
