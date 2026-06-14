@@ -18,11 +18,16 @@
  * board). Re-run /agents to refresh the public summary. A live in-place public
  * board is deferred to a future task that owns the embed-update seam.
  *
- * Authorization is two-layer (the compact-everywhere lesson). The slash is
- * framework-gated by `requireAdmin`. Component handlers are framework-UNGATED
- * (a known Task7 gap — `handleComponent` runs no auth), so each handler
- * re-checks `isAdmin` itself on the channel agent, symmetric with the slash
- * gate. When the permissions module isn't installed, `isAdmin` allows all.
+ * Authorization: the panel aggregates session activity across ALL agent groups
+ * (`getActiveSessions` is global), so it is restricted to a GLOBAL owner/admin —
+ * every entry point checks `isAdmin(userId, null)` (a `user_roles` row with
+ * `agent_group_id IS NULL`). `requireAdmin` on the slash is a framework
+ * pre-filter (channel-scoped); the explicit null-gate in each handler is
+ * authoritative and also covers the component handlers, which the framework
+ * leaves UNGATED (the known Task7 gap). A channel-scoped admin is therefore
+ * denied — this is a global ops view, not a per-channel one. When the
+ * permissions module isn't installed, `isAdmin` allows all (the fork-wide
+ * stance).
  *
  * Additive: new module + 1 barrel import in src/modules/index.ts, plus the one
  * generic bridge-card-action seam (callback buttons on cards). See
@@ -37,7 +42,6 @@ import {
   type SlashResult,
 } from '../../channels/discord-interactions.js';
 import { isAdmin } from '../../command-gate.js';
-import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 
@@ -51,19 +55,8 @@ const REFRESH_ID = 'work:refresh';
 const DETAILS_ID = 'work:details';
 
 const NO_ADAPTER = '지금은 패널을 게시할 수 없습니다. 잠시 후 다시 시도해주세요.';
-const NOT_ADMIN = '관리자 전용입니다.';
+const NOT_ADMIN = '전역 관리자 전용입니다.';
 const PANEL_POSTED = '에이전트 활동 패널을 게시했습니다.';
-
-/**
- * Replicates the framework's (non-exported) defaultResolveAgentGroupId so the
- * component handlers can self-gate on the same channel-agent basis the slash
- * `requireAdmin` uses.
- */
-function resolveAgentGroupId(platformId: string): string | null {
-  const mg = getMessagingGroupByPlatform('discord', platformId);
-  if (!mg) return null;
-  return getMessagingGroupAgents(mg.id)[0]?.agent_group_id ?? null;
-}
 
 /** The public panel: a compact summary card with two callback buttons. */
 function panelContent(): string {
@@ -82,6 +75,7 @@ function panelContent(): string {
 
 /** Slash handler — posts the public panel, acks the caller ephemerally. */
 export async function handleAgentsPanel(inv: SlashInvocation): Promise<SlashResult> {
+  if (!isAdmin(inv.userId, null)) return { text: NOT_ADMIN };
   const adapter = getDeliveryAdapter();
   if (!adapter) return { text: NO_ADAPTER };
   await adapter.deliver('discord', inv.platformId, null, DELIVER_KIND, panelContent());
@@ -91,7 +85,7 @@ export async function handleAgentsPanel(inv: SlashInvocation): Promise<SlashResu
 
 /** Refresh button — fresh compact snapshot, private to the clicker. */
 export async function handleRefresh(inv: ComponentInvocation): Promise<ComponentResult> {
-  if (!isAdmin(inv.userId, resolveAgentGroupId(inv.platformId))) {
+  if (!isAdmin(inv.userId, null)) {
     return { message: { text: NOT_ADMIN } };
   }
   return { message: { text: renderPanel(buildSnapshot()) } };
@@ -99,7 +93,7 @@ export async function handleRefresh(inv: ComponentInvocation): Promise<Component
 
 /** Details button — fresh per-session detail, private to the clicker. */
 export async function handleDetails(inv: ComponentInvocation): Promise<ComponentResult> {
-  if (!isAdmin(inv.userId, resolveAgentGroupId(inv.platformId))) {
+  if (!isAdmin(inv.userId, null)) {
     return { message: { text: NOT_ADMIN } };
   }
   const pages = renderDetails(buildSnapshot());

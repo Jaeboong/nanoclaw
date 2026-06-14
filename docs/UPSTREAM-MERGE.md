@@ -283,12 +283,17 @@ call as the Grafana webhook in `docs/webhook-ingress-grafana.md`).
   `ReturnType<typeof Button>` resolves to the overload's `ChatElement`.)
 - **Core touches (ledger):** one side-effect import — `src/modules/index.ts`
   (+1) — plus the one bridge-card-action seam above. No other core edit.
-- **Authorization:** slash framework-gated (`requireAdmin: true` → `handleSlash`
-  `isAdmin`). Component handlers are framework-UNGATED (the known Task 7 gap —
-  `handleComponent` runs no auth), so each handler re-checks
-  `isAdmin(inv.userId, resolveAgentGroupId(inv.platformId))` itself —
-  channel-agent basis, symmetric with the slash gate (the same per-handler
-  re-check compact-everywhere uses).
+- **Authorization — GLOBAL owner/admin (not channel-scoped):** the snapshot is
+  `getActiveSessions` (global, across ALL agent groups), so every entry point —
+  the slash handler and both component handlers — gates on
+  `isAdmin(inv.userId, null)` (a `user_roles` row with `agent_group_id IS NULL`).
+  `requireAdmin: true` on the slash is a framework pre-filter (channel-scoped);
+  the explicit null-gate is authoritative and also covers the component handlers,
+  which the framework leaves UNGATED (the known Task 7 gap). A channel-scoped
+  admin is denied — this is a global ops view, not a per-channel one. (Review
+  found the original channel-agent gate leaked cross-agent telemetry to a scoped
+  admin; the global gate closes it and lets the copied `resolveAgentGroupId`
+  helper be deleted.)
 - **Refresh model — ephemeral views, NOT in-place edit (load-bearing, verified
   against `@chat-adapter/discord@4.26.0`):** a card always renders as message
   `content` (`cardToFallbackText`) + an embed + a component row, and

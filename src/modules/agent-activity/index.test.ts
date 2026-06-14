@@ -190,8 +190,9 @@ describe('/agents registration', () => {
     expect(slash.def?.requireAdmin).toBe(true);
     expect(slash.def?.deferred).toBe(true);
     expect(typeof slash.handler).toBe('function');
-    expect(components.has('work:refresh')).toBe(true);
-    expect(components.has('work:details')).toBe(true);
+    // Identity, not just presence — a handler swap must fail this.
+    expect(components.get('work:refresh')).toBe(handleRefresh);
+    expect(components.get('work:details')).toBe(handleDetails);
     // custom_ids must not collide with the reserved ask_question prefix.
     for (const id of components.keys()) expect(id.startsWith('ncq:')).toBe(false);
   });
@@ -238,8 +239,16 @@ describe('component handlers', () => {
     seedChannel(['ag-1']);
     activeSession('ag-1', 'sess-1');
     const res = await handleRefresh(componentInv('work:refresh', { userId: 'discord:rando' }));
-    expect(res.message?.text).toBe('관리자 전용입니다.');
+    expect(res.message?.text).toBe('전역 관리자 전용입니다.');
     expect(res.update).toBeUndefined();
+  });
+
+  it('denies a channel-scoped admin — the panel is a GLOBAL ops view', async () => {
+    seedChannel(['ag-1']);
+    activeSession('ag-1', 'sess-1');
+    seedAdmin('discord:scoped', 'ag-1'); // admin of ag-1 only, no global role
+    const res = await handleRefresh(componentInv('work:refresh', { userId: 'discord:scoped' }));
+    expect(res.message?.text).toBe('전역 관리자 전용입니다.');
   });
 
   it('Details returns an ephemeral per-session detail for an admin', async () => {
@@ -255,7 +264,7 @@ describe('component handlers', () => {
 
   it('Details denies a non-admin', async () => {
     const res = await handleDetails(componentInv('work:details', { userId: 'discord:rando' }));
-    expect(res.message?.text).toBe('관리자 전용입니다.');
+    expect(res.message?.text).toBe('전역 관리자 전용입니다.');
   });
 });
 
@@ -332,5 +341,14 @@ describe('renderers (pure)', () => {
     expect(pages.length).toBe(1);
     expect(pages[0]).toContain('세션');
     expect(pages[0]).toContain('x');
+  });
+
+  it('renderDetails: packs many rows into multiple pages, each under the cap', () => {
+    const many = Array.from({ length: 200 }, (_, i) =>
+      row({ sessionId: `sess-${i}`, agentName: `에이전트번호${i}`, status: 'working', currentTool: 'Bash', elapsedSec: i }),
+    );
+    const pages = renderDetails(many);
+    expect(pages.length).toBeGreaterThan(1);
+    for (const p of pages) expect(p.length).toBeLessThanOrEqual(1900);
   });
 });

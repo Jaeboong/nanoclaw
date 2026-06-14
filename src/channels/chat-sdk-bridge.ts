@@ -502,9 +502,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         return result?.id;
       }
 
-      // Display card (send_card MCP tool) — returns immediately, no callback flow.
-      // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
-      // callback button would have nowhere to land. URL actions render as link buttons.
+      // Display card (send_card MCP tool). Actions render as buttons: a `url`
+      // action → link button; an `id` action → callback button routed via the
+      // forwarded-interaction router (see the actions block below).
       if (content.type === 'card' && content.card && typeof content.card === 'object') {
         const cardSpec = content.card as Record<string, unknown>;
         const title = (cardSpec.title as string) || '';

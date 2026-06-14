@@ -270,7 +270,7 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.card).toBeDefined();
   });
 
-  it('drops actions without url (send_card is fire-and-forget; non-URL buttons would have nowhere to land)', async () => {
+  it('drops actions with neither url nor id (a callback button needs an id to route)', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
       adapter: stubAdapter({ postMessage }),
@@ -319,6 +319,54 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(buttons).toHaveLength(1);
     expect(buttons[0].type).toBe('link-button');
     expect(buttons[0].url).toBe('https://example.com');
+  });
+
+  it('renders id actions as callback buttons inside an Actions row', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: { title: 'Activity', actions: [{ id: 'work:refresh', label: '새로고침' }] },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: {
+        children?: Array<{ type?: string; children?: Array<{ type?: string; id?: string; value?: string; url?: string }> }>;
+      };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(1);
+    // A callback button — NOT a link button — carrying the registered custom_id.
+    expect(buttons[0].type).toBe('button');
+    expect(buttons[0].id).toBe('work:refresh');
+    expect(buttons[0].value).toBe('work:refresh');
+    expect(buttons[0].url).toBeUndefined();
+  });
+
+  it('renders a link button when an action has both url and id (url wins)', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: { title: 'Both', actions: [{ id: 'x', url: 'https://example.com', label: 'L' }] },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: Array<{ type?: string }> }> };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].type).toBe('link-button');
   });
 
   it('skips delivery when the card has neither title nor body content', async () => {

@@ -9,6 +9,8 @@
 import type { ActivityRow, ActivityStatus } from './snapshot.js';
 
 const MAX_BODY = 1900;
+/** Reserved headroom so the overflow note never pushes renderPanel past MAX_BODY. */
+const NOTE_BUDGET = 48;
 const EMPTY = '활성 세션이 없습니다.';
 
 interface Counts {
@@ -44,34 +46,39 @@ function compactLine(r: ActivityRow): string {
   return `${statusEmoji(r.status)} **${r.agentName}** — ${statusText(r)}`;
 }
 
+/** The aggregate counts line, shared by the public summary and the live panel. */
+function countsLine(rows: readonly ActivityRow[]): string {
+  const c = tally(rows);
+  return `활성 ${c.total} · 🟢 작업 ${c.working} · 🟡 대기 ${c.thinking} · ⚫ 중지 ${c.stopped}`;
+}
+
 /**
  * One-line counts summary — the body of the public panel card. Kept short on
  * purpose: the card path renders this in both the message content and the
  * embed (an SDK behavior shared with ask_question), so a single summary line
  * keeps that duplication trivial. The per-session detail lives behind the
- * buttons (ephemeral, plain content — no embed, no duplication).
+ * buttons (ephemeral, plain content — no embed, no duplication). The advisory
+ * line reflects that the public card is a snapshot at post time.
  */
 export function renderSummary(rows: readonly ActivityRow[]): string {
   if (rows.length === 0) return EMPTY;
-  const c = tally(rows);
-  return (
-    `활성 ${c.total} · 🟢 작업 ${c.working} · 🟡 대기 ${c.thinking} · ⚫ 중지 ${c.stopped}\n` +
-    '게시 시각 기준 — 🔄 새로고침으로 최신 현황 보기'
-  );
+  return `${countsLine(rows)}\n게시 시각 기준 — 🔄 새로고침으로 최신 현황 보기`;
 }
 
 /**
  * Compact per-session view delivered as an ephemeral followup when Refresh is
- * clicked. Clamped to MAX_BODY; overflow is noted and routed to Details.
+ * clicked — this data IS live, so it carries the "방금 갱신" marker rather than
+ * the public card's "게시 시각 기준" advisory. Clamped to MAX_BODY (with the
+ * overflow note's headroom reserved up front); overflow is routed to Details.
  */
 export function renderPanel(rows: readonly ActivityRow[]): string {
   if (rows.length === 0) return EMPTY;
-  const header = renderSummary(rows);
+  const header = `${countsLine(rows)} · 방금 갱신`;
   const lines: string[] = [];
   let used = header.length + 2;
   for (const r of rows) {
     const line = compactLine(r);
-    if (used + line.length + 1 > MAX_BODY) break;
+    if (used + line.length + 1 > MAX_BODY - NOTE_BUDGET) break;
     lines.push(line);
     used += line.length + 1;
   }
@@ -96,7 +103,9 @@ export function renderDetails(rows: readonly ActivityRow[]): readonly string[] {
   const pages: string[] = [];
   let cur = '';
   for (const r of rows) {
-    const block = detailBlock(r);
+    // Hard-cap a single block so one very long operator-set chat/agent name
+    // can't blow a page past MAX_BODY on its own.
+    const block = detailBlock(r).slice(0, MAX_BODY);
     if (cur && cur.length + block.length + 2 > MAX_BODY) {
       pages.push(cur);
       cur = '';
