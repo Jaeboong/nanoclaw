@@ -372,3 +372,41 @@ differently-colored section boxes. The adapter is `node_modules` (unpatchable).
     replies; not used for editable/streamed messages (those keep their paths).
   - *Live Discord verification is post-cutover only* (same bot token as v1 —
     can't run both gateways at once); covered by host tsc + vitest until then.
+
+## Re-cutover blockers: responder/collab host-file write-through + /model live restart
+
+Two regressions that v2 introduced vs the v1 fork, fixed before re-cutover so the
+사용자's cross-bot environment behaves as it did on v1.
+
+### Blocker 1 — responder/collab write-through to v1 host files (additive)
+
+- **Why:** v2 moved responder + collab session state into SQLite. The sibling
+  Codex bot (나붕봇) is a *separate process* that only reads v1's shared host
+  files `~/.config/nanoclaw/{responder,collab}-state.json` (keyed by chatJid
+  `dc:<discordChannelId>`). DB-only persistence made `/responder` and `/collab`
+  invisible to it → cross-bot coordination silently broke.
+- **Fix:** new additive module `src/modules/collab/host-mirror.ts` mirrors every
+  DB write through to the v1-format host file, one channel entry at a time
+  (read-modify-write preserves channels this process doesn't own). One-way only
+  (NanoClaw is the sole writer; 나붕봇 only reads). Best-effort: a malformed/locked
+  file logs and skips rather than clobbering; never throws into the DB path.
+- **Key mapping gotcha:** v2 stores Discord groups as
+  `platform_id = discord:<guildId>:<channelId>`, but v1 host files key on
+  `dc:<channelId>`. `chatJidForGroup` takes the **trailing channel snowflake**,
+  not the whole platform id (verified against the live host file: every channel
+  matches). `dc:${platform_id}` would have been silently wrong.
+- **Seam:** `db.ts setResponder`/`upsertCollabSession` call `mirrorResponder`/
+  `mirrorCollab` right after their `.run(...)` — centralized so no mutation site
+  is missed. `collab-state.json` honors `NANOCLAW_COLLAB_STATE_PATH` like v1;
+  `NANOCLAW_RESPONDER_STATE_PATH` is a v2-only test seam (unset in prod).
+
+### Blocker 2 — /model & /effort live restart (reuses existing primitive)
+
+- **Why:** v2 persisted model/effort to `container_configs` applied only at the
+  *next spawn*; a long-lived container never picked the change up mid-session.
+- **Fix:** `runtime-control.ts` calls the existing
+  `restartAgentGroupContainers(agentGroupId, reason)` after persisting, killing
+  any running container (no wake message) so the next message respawns with the
+  new config — restoring v1's "applies right away" feel. No-op when nothing is
+  running (then it applies on next spawn, as before). Reply text reports the
+  restart count.

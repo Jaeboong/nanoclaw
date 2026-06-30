@@ -4,11 +4,12 @@
  * spawn.
  *
  * Additive module (see docs/UPSTREAM-MERGE.md): self-registers into the
- * interaction framework on import; touches no upstream-core logic. v1 stored
- * these in a per-folder `runtime-settings.json` applied on the *next message*;
- * v2's idiom is the `container_configs` row applied at *spawn* — an
- * adopt-upstream behavior delta (a change takes effect when the container next
- * starts, not mid-session).
+ * interaction framework on import; touches no upstream-core logic. State lives
+ * in the `container_configs` row (v2's idiom; v1 used a per-folder
+ * `runtime-settings.json`). A change applies immediately: after persisting, any
+ * running container for the group is restarted (via the existing
+ * `restartAgentGroupContainers` primitive) so the new model/effort takes effect
+ * without waiting for a natural spawn — restoring v1's "applies right away" feel.
  *
  * Auth: admin-gated (`requireAdmin`) — a config change, conforming to v2's
  * command-gate model. v1 left these open to any group member; the owner is
@@ -18,14 +19,16 @@
  * Choices are a fixed list: the adapter drops Autocomplete interactions over
  * the gateway, so v1's dynamic model autocomplete isn't available.
  */
+import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import {
-  ensureContainerConfig,
-  getContainerConfig,
-  updateContainerConfigScalars,
-} from '../../db/container-configs.js';
+import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { OPTION_STRING, registerSlashCommand, type SlashInvocation, type SlashResult } from '../discord-interactions.js';
+import {
+  OPTION_STRING,
+  registerSlashCommand,
+  type SlashInvocation,
+  type SlashResult,
+} from '../discord-interactions.js';
 
 /** Sentinel choice value meaning "clear the override; use the SDK default". */
 const DEFAULT_VALUE = '__default__';
@@ -84,6 +87,18 @@ function resolveAgentGroup(platformId: string): ResolvedGroup | null {
 
 const NOT_WIRED = '이 채널은 NanoClaw 에이전트에 연결되어 있지 않습니다.';
 
+/**
+ * Apply a model/effort change to any running container immediately. A container
+ * caches its config at spawn, so kill it (no wake message) and let the next
+ * message respawn with the new config — restoring v1's "applies right away"
+ * feel instead of waiting for a far-off natural restart. No-op (and the change
+ * applies on next spawn) when nothing is running. Returns a user-facing suffix.
+ */
+function applyLive(agentGroupId: string, reason: string): string {
+  const restarted = restartAgentGroupContainers(agentGroupId, reason);
+  return restarted > 0 ? `(실행 중 컨테이너 ${restarted}개 재시작 — 즉시 적용)` : '(다음 컨테이너 시작부터 적용)';
+}
+
 function currentSettings(agentGroupId: string): string {
   const cfg = getContainerConfig(agentGroupId);
   return `현재 — 모델: **${labelForModel(cfg?.model ?? null)}** · effort: **${labelForEffort(cfg?.effort ?? null)}**`;
@@ -99,7 +114,8 @@ async function handleModel(inv: SlashInvocation): Promise<SlashResult> {
   ensureContainerConfig(group.agentGroupId);
   const model = choice === DEFAULT_VALUE ? null : choice;
   updateContainerConfigScalars(group.agentGroupId, { model });
-  return { text: `모델 변경 → **${labelForModel(model)}** (다음 컨테이너 시작부터 적용)` };
+  const suffix = applyLive(group.agentGroupId, 'Model changed via /model');
+  return { text: `모델 변경 → **${labelForModel(model)}** ${suffix}` };
 }
 
 async function handleEffort(inv: SlashInvocation): Promise<SlashResult> {
@@ -112,7 +128,8 @@ async function handleEffort(inv: SlashInvocation): Promise<SlashResult> {
   ensureContainerConfig(group.agentGroupId);
   const effort = level === 'off' ? null : level;
   updateContainerConfigScalars(group.agentGroupId, { effort });
-  return { text: `Effort 변경 → **${labelForEffort(effort)}** (다음 컨테이너 시작부터 적용)` };
+  const suffix = applyLive(group.agentGroupId, 'Effort changed via /effort');
+  return { text: `Effort 변경 → **${labelForEffort(effort)}** ${suffix}` };
 }
 
 registerSlashCommand(

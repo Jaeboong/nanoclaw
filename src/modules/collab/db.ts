@@ -6,6 +6,7 @@
  * (cf. container-configs.ts) — no separate file.
  */
 import { getDb } from '../../db/connection.js';
+import { mirrorCollab, mirrorResponder } from './host-mirror.js';
 import type { CollabSession } from './state.js';
 import { type Responder, isResponder } from './responder.js';
 
@@ -50,8 +51,7 @@ function rowToSession(row: CollabSessionRow): CollabSession {
     row.last_status === 'BLOCKED'
       ? row.last_status
       : undefined;
-  const lastAgent =
-    row.last_agent === 'claude' || row.last_agent === 'codex' ? row.last_agent : undefined;
+  const lastAgent = row.last_agent === 'claude' || row.last_agent === 'codex' ? row.last_agent : undefined;
   return {
     id: row.session_id,
     task: row.task,
@@ -71,9 +71,9 @@ function rowToSession(row: CollabSessionRow): CollabSession {
 }
 
 export function getCollabSession(messagingGroupId: string): CollabSession | undefined {
-  const row = getDb()
-    .prepare('SELECT * FROM collab_sessions WHERE messaging_group_id = ?')
-    .get(messagingGroupId) as CollabSessionRow | undefined;
+  const row = getDb().prepare('SELECT * FROM collab_sessions WHERE messaging_group_id = ?').get(messagingGroupId) as
+    | CollabSessionRow
+    | undefined;
   return row ? rowToSession(row) : undefined;
 }
 
@@ -129,6 +129,8 @@ export function upsertCollabSession(messagingGroupId: string, session: CollabSes
       last_agent: session.lastAgent ?? null,
       ended_reason: session.endedReason ?? null,
     });
+  // Mirror to the v1 host file so the sibling Codex bot (나붕봇) sees the turn.
+  mirrorCollab(messagingGroupId, session);
 }
 
 export function getResponder(messagingGroupId: string): Responder {
@@ -138,11 +140,8 @@ export function getResponder(messagingGroupId: string): Responder {
   return row && isResponder(row.responder) ? row.responder : 'claude';
 }
 
-export function setResponder(
-  messagingGroupId: string,
-  responder: Responder,
-  updatedBy: string,
-): void {
+export function setResponder(messagingGroupId: string, responder: Responder, updatedBy: string): void {
+  const updatedAt = new Date().toISOString();
   getDb()
     .prepare(
       `INSERT INTO responder_state (messaging_group_id, responder, updated_by, updated_at)
@@ -152,5 +151,7 @@ export function setResponder(
          updated_by = excluded.updated_by,
          updated_at = excluded.updated_at`,
     )
-    .run(messagingGroupId, responder, updatedBy, new Date().toISOString());
+    .run(messagingGroupId, responder, updatedBy, updatedAt);
+  // Mirror to the v1 host file so the sibling Codex bot (나붕봇) sees the change.
+  mirrorResponder(messagingGroupId, responder, updatedBy, updatedAt);
 }
