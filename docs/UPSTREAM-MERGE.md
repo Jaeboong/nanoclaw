@@ -317,3 +317,49 @@ call as the Grafana webhook in `docs/webhook-ingress-grafana.md`).
     cleared on container crash/kill; the snapshot gates every tool read on
     `isContainerRunning`, so a dead container shows `⚫ 중지됨`, not a phantom
     tool. The underlying stale row is a v2 issue this module works around.
+
+## Worked example — colored section embeds (outbound rendering)
+
+The v1 fork rendered every agent reply as colored Discord embed boxes, split on
+Korean `## 분석/결론/주의/질문/로그` section headers (green/blue/red/yellow/gray,
+white default), with markdown pipe tables rendered to PNG embeds and a tool/
+timing/model footer. v2 dropped it: the normal-message path posts plain
+markdown, and the cross-platform card path is the only embed route —
+`@chat-adapter/discord`'s `cardToDiscordPayload` **hard-codes** `embed.color =
+5793266` and always returns exactly **one** embed, so it cannot express N
+differently-colored section boxes. The adapter is `node_modules` (unpatchable).
+
+- **Module:** `src/channels/discord-features/` (beside the table-render port) —
+  `section-embeds.ts` (pure: `parseSections` + `buildSectionEmbeds` → plain
+  Discord-REST `APIEmbed[]` + PNG attachments, reusing `table-render.ts`),
+  `section-rest.ts` (minimal Discord REST poster, multipart for PNGs, 10-embed
+  chunking, degrades to null on token-missing/HTTP-error/rate-limit),
+  `section-outbound.ts` (the `deliverRichMessage` hook: encoded-thread-id →
+  channel snowflake, render, post, fall back on any failure). Tests:
+  `section-embeds.test.ts` (25 cases, ported from v1) + `section-outbound.test.ts`
+  (seam branch coverage — handled / non-Discord / blank / REST-failure / throw).
+- **Core seam (one, generic, additive):** `chat-sdk-bridge.ts` gains an optional
+  `deliverRichMessage?({threadId,text,files}) => {handled, messageId?}` config
+  field + a 4-line branch at the top of the normal-message path: tried before
+  the markdown delivery; `{handled:true}` returns its id, `{handled:false}` (no
+  rich content **or** a delivery failure to fall back from) continues to the
+  unchanged markdown+`transformOutboundMessage` path. Discord-free, platform-
+  agnostic — any adapter that can emit native rich payloads the card abstraction
+  can't express is a consumer. **Upstream-PR candidate.**
+- **Wiring:** `src/channels/discord.ts` (a fork/skill file) passes
+  `deliverRichMessage: (msg) => deliverSectionEmbeds(msg)`. The existing
+  `transformOutboundMessage: renderOutboundTables` stays as the **fallback**
+  table renderer for when rich delivery no-ops/fails.
+- **Token:** reuses the adapter's `DISCORD_BOT_TOKEN` (read via `readEnvFile`);
+  no new credential.
+- **Known gaps (deliberate / deferred):**
+  - *Footer degrades to nothing today.* `buildSectionEmbeds` accepts optional
+    `SectionMetadata` (tool counts / elapsed / model) but the v2 outbound path
+    does not yet plumb it, so the footer is simply omitted. Wiring the metadata
+    source is a separate follow-up; the renderer is ready for it.
+  - *Bypasses the adapter's bookkeeping.* The REST post is outside the chat
+    adapter, so adapter-level message state isn't updated; the bridge still
+    returns the real message id for `outbound.db`. Acceptable for fire-and-post
+    replies; not used for editable/streamed messages (those keep their paths).
+  - *Live Discord verification is post-cutover only* (same bot token as v1 —
+    can't run both gateways at once); covered by host tsc + vitest until then.

@@ -10,6 +10,7 @@ import { createChatSdkBridge, setForwardedInteractionRouter, type ReplyContext }
 import { registerChannelAdapter } from './channel-registry.js';
 import { registerSlashCommandsWithDiscord, routeForwardedInteraction } from './discord-interactions.js';
 import { renderOutboundTables } from './discord-features/table-outbound.js';
+import { deliverSectionEmbeds } from './discord-features/section-outbound.js';
 // Feature modules self-register their slash commands / component handlers on
 // import (side-effect), populating the interaction registry before
 // registerSlashCommandsWithDiscord runs below.
@@ -51,8 +52,14 @@ registerChannelAdapter('discord', {
       botToken,
       extractReplyContext,
       supportsThreads: true,
-      // Render CJK markdown tables to PNG attachments so wide glyphs don't
-      // misalign (additive module via the generic transformOutboundMessage seam).
+      // Render each agent reply as colored section embeds (the v1 흰/초록/파랑/
+      // 빨강/노랑/회색 칸 look) posted via Discord REST, since the card path can
+      // only emit a single hard-coded-color embed (additive module via the
+      // generic deliverRichMessage seam). Falls back to the markdown path below.
+      deliverRichMessage: (msg) => deliverSectionEmbeds(msg),
+      // Fallback when rich delivery no-ops/fails: render CJK markdown tables to
+      // PNG attachments so wide glyphs don't misalign (additive module via the
+      // generic transformOutboundMessage seam).
       transformOutboundMessage: renderOutboundTables,
     });
   },

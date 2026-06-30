@@ -101,6 +101,22 @@ export interface ChatSdkBridgeConfig {
    */
   transformOutboundMessage?: (msg: OutboundMessageTransform) => Promise<OutboundMessageTransform>;
   /**
+   * Optional native rich delivery for the normal-message path, tried BEFORE the
+   * plain-markdown delivery. The hook sees the agent's raw body + files and may
+   * emit platform-native payloads the cross-platform card abstraction can't
+   * express — e.g. multiple colored Discord embeds, where `cardToDiscordPayload`
+   * hard-codes a single embed color. Returning `{ handled: true }` skips the
+   * markdown path and returns its `messageId`; `{ handled: false }` (no rich
+   * content, or a delivery failure to fall back from) continues to the standard
+   * path (so it still gets `transformOutboundMessage`). Generic and
+   * platform-agnostic: the bridge passes `{threadId, text, files}`.
+   */
+  deliverRichMessage?: (msg: {
+    threadId: string;
+    text: string;
+    files: readonly OutboundFileUpload[];
+  }) => Promise<{ handled: true; messageId?: string } | { handled: false }>;
+  /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
    * → line → hard-char boundaries and posts multiple messages. Without this,
@@ -563,10 +579,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
       // Normal message
       const rawText = (content.markdown as string) || (content.text as string) || '';
+      const rawFiles: readonly OutboundFileUpload[] = message.files ?? [];
+      // Native rich delivery (e.g. colored Discord embeds) is tried first; it
+      // sees the agent's raw body + files. On a no-op or delivery failure it
+      // returns { handled: false } and we fall through to the markdown path.
+      if (config.deliverRichMessage && (rawText || rawFiles.length > 0)) {
+        const rich = await config.deliverRichMessage({ threadId: tid, text: rawText, files: rawFiles });
+        if (rich.handled) return rich.messageId;
+      }
       // Message-level transform first (sees text + files, may rewrite the body
       // and add/replace attachments), then the text-only platform sanitizer.
       let bodyText = rawText;
-      let outFiles: readonly OutboundFileUpload[] = message.files ?? [];
+      let outFiles: readonly OutboundFileUpload[] = rawFiles;
       if (config.transformOutboundMessage && (rawText || outFiles.length > 0)) {
         const transformed = await config.transformOutboundMessage({ text: rawText, files: outFiles });
         bodyText = transformed.text;
