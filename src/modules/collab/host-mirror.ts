@@ -80,7 +80,13 @@ function readChannels<T>(filePath: string): ChannelsFile<T> {
 
 function writeChannels<T>(filePath: string, file: ChannelsFile<T>): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(file, null, 2)}\n`);
+  // Atomic write: 나붕봇 polls this file most aggressively *during* a collab turn
+  // (exactly when mirrorCollab fires), so a partial read of a half-written file
+  // would corrupt its turn-taking. temp+rename makes the swap atomic on the same
+  // filesystem — readers see either the old or the new file, never a torn one.
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`);
+  fs.renameSync(tmp, filePath);
 }
 
 interface ResponderEntry {
