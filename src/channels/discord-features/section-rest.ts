@@ -16,6 +16,40 @@ import type { DiscordEmbed, EmbedAttachment } from './section-embeds.js';
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const EMBEDS_PER_MESSAGE = 10;
+// Discord caps the SUM of all embed text (title + description + footer + field
+// names/values) across a single message at 6000 chars. Stay just under it.
+const EMBED_TEXT_BUDGET = 5900;
+
+function embedTextLength(e: DiscordEmbed): number {
+  let n = (e.title?.length ?? 0) + (e.description?.length ?? 0) + (e.footer?.text.length ?? 0) + (e.author?.name.length ?? 0);
+  for (const f of e.fields ?? []) n += f.name.length + f.value.length;
+  return n;
+}
+
+/**
+ * Group embeds into messages of at most {@link EMBEDS_PER_MESSAGE}, also
+ * starting a new message whenever the running embed-text total would exceed
+ * Discord's 6000-char aggregate cap — otherwise a few long section boxes get
+ * the whole message rejected and the reply silently falls back to plain text.
+ */
+function chunkEmbeds(embeds: readonly DiscordEmbed[]): DiscordEmbed[][] {
+  const chunks: DiscordEmbed[][] = [];
+  let current: DiscordEmbed[] = [];
+  let runningLen = 0;
+  for (const e of embeds) {
+    const len = embedTextLength(e);
+    const wouldOverflow = current.length > 0 && (current.length >= EMBEDS_PER_MESSAGE || runningLen + len > EMBED_TEXT_BUDGET);
+    if (wouldOverflow) {
+      chunks.push(current);
+      current = [];
+      runningLen = 0;
+    }
+    current.push(e);
+    runningLen += len;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
 
 export interface RichPayload {
   embeds: readonly DiscordEmbed[];
@@ -57,13 +91,16 @@ export async function postSectionEmbeds(
   const fetchFn = deps.fetchFn ?? fetch;
   const attachmentByName = new Map(payload.attachments.map((a) => [a.name, a]));
 
-  // Chunk embeds into <=10 per message; the first chunk also carries the
-  // optional plain `content`.
-  const chunks: DiscordEmbed[][] = [];
-  for (let i = 0; i < payload.embeds.length; i += EMBEDS_PER_MESSAGE) {
-    chunks.push(payload.embeds.slice(i, i + EMBEDS_PER_MESSAGE));
-  }
+  // Chunk embeds under both the 10-per-message and 6000-char-aggregate caps;
+  // the first chunk also carries the optional plain `content`.
+  const chunks = chunkEmbeds(payload.embeds);
   if (chunks.length === 0) return null;
+  if (chunks.length > 1) {
+    log.debug('section-rest: split embeds across messages (count/6000-char cap)', {
+      embeds: payload.embeds.length,
+      messages: chunks.length,
+    });
+  }
 
   let firstId: string | null = null;
   for (let i = 0; i < chunks.length; i++) {

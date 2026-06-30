@@ -16,12 +16,25 @@ import { deliverSectionEmbeds } from './discord-features/section-outbound.js';
 // registerSlashCommandsWithDiscord runs below.
 import './discord-features/runtime-control.js';
 
+// Our own agent replies are delivered as colored embeds with empty message
+// `content` (see section-outbound), so when a message quotes one, its text
+// lives in the embed description, not `content`. Mirrors the v1 fork's
+// extractEmbedText so reply context isn't blanked out.
+function extractEmbedText(embeds: readonly unknown[] | undefined): string {
+  if (!Array.isArray(embeds)) return '';
+  for (const e of embeds) {
+    const desc = (e as { description?: unknown })?.description;
+    if (typeof desc === 'string' && desc.trim()) return desc;
+  }
+  return '';
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   if (!raw.referenced_message) return null;
   const reply = raw.referenced_message;
   return {
-    text: reply.content || '',
+    text: reply.content || extractEmbedText(reply.embeds) || '',
     sender: reply.author?.global_name || reply.author?.username || 'Unknown',
   };
 }

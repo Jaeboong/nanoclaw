@@ -67,6 +67,21 @@ describe('deliverSectionEmbeds', () => {
     expect(payload.extraFiles).toEqual([{ name: 'a.png', data: Buffer.from([1]) }]);
   });
 
+  it('splits embeds across messages when the 6000-char aggregate cap is exceeded', async () => {
+    // Three sections, ~2500 chars each → 7500 total > 6000, so the real poster
+    // must split into >1 Discord message instead of one rejected request.
+    const big = (label: string) => `## ${label}\n${'가'.repeat(2500)}`;
+    const text = [big('🔍 분석'), big('📌 결론'), big('⚠️ 주의')].join('\n\n');
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'm' }), { status: 200 }));
+    // Use the real REST poster (only fetch + token injected) to exercise chunking.
+    const result = await deliverSectionEmbeds(
+      { threadId: 'discord:1:2', text, files: [] },
+      { fetchFn: fetchFn as unknown as typeof fetch, token: 'x' },
+    );
+    expect(result.handled).toBe(true);
+    expect(fetchFn.mock.calls.length).toBeGreaterThan(1);
+  });
+
   it('falls back when rendering throws', async () => {
     const post = postMock(okPost);
     const build = vi.fn(async () => {

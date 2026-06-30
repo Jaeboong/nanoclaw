@@ -352,6 +352,15 @@ differently-colored section boxes. The adapter is `node_modules` (unpatchable).
   table renderer for when rich delivery no-ops/fails.
 - **Token:** reuses the adapter's `DISCORD_BOT_TOKEN` (read via `readEnvFile`);
   no new credential.
+- **Integration guards:** (a) embeds are chunked under BOTH the 10-per-message
+  and Discord's 6000-char aggregate-text caps, so long multi-section replies
+  split into multiple messages instead of being silently rejected → markdown.
+  (b) Because replies now carry empty message `content` (text lives in the embed
+  description), `discord.ts extractReplyContext` falls back to the embed
+  description (ported `extractEmbedText`) so quoting a reply isn't blanked —
+  matches v1. Collab bookkeeping is unaffected: 재붕봇's own turn is recorded
+  from the raw outbound row (pre-delivery), and peer (Codex) turns come from the
+  peer's own non-embed messages.
 - **Known gaps (deliberate / deferred):**
   - *Footer degrades to nothing today.* `buildSectionEmbeds` accepts optional
     `SectionMetadata` (tool counts / elapsed / model) but the v2 outbound path
