@@ -19,7 +19,11 @@
  * Choices are a fixed list: the adapter drops Autocomplete interactions over
  * the gateway, so v1's dynamic model autocomplete isn't available.
  */
+import { spawn } from 'node:child_process';
+
 import { restartAgentGroupContainers } from '../../container-restart.js';
+import { getSystemdUnit } from '../../install-slug.js';
+import { log } from '../../log.js';
 import {
   catalogChoices,
   labelForModel,
@@ -180,13 +184,43 @@ async function handleUpdate(_inv: SlashInvocation): Promise<SlashResult> {
       text: `업데이트 실패 (${r.from ?? '?'} → ${r.to ?? '?'}): ${r.error ?? '알 수 없는 오류'}.\n라이브 이미지는 그대로 유지됩니다.`,
     };
   }
-  // Refresh the /model catalog cache so labels reflect the new SDK's models
-  // (registered slash choices pick it up on the next host restart).
+  // Refresh the /model catalog cache so the new SDK's models are available, then
+  // schedule a host restart so the slash choices re-register with them (Discord
+  // pushes command choices only at boot). The deferred follow-up below is sent
+  // first; the restart fires a few seconds later.
   await refreshModelCatalog(true).catch(() => undefined);
+  const restarting = scheduleHostRestart();
   const models = r.models?.length ? `\n모델: ${r.models.join(', ')}` : '';
+  const note = restarting
+    ? '\n♻️ 새 모델을 `/model` 메뉴에 반영하기 위해 잠시 후 자동 재시작합니다.'
+    : '';
   return {
-    text: `Agent SDK 업데이트 완료 — **${r.from ?? '?'} → ${r.to}**. 컨테이너 ${r.recycled ?? 0}개 재활용.${models}`,
+    text: `Agent SDK 업데이트 완료 — **${r.from ?? '?'} → ${r.to}**. 컨테이너 ${r.recycled ?? 0}개 재활용.${models}${note}`,
   };
+}
+
+/**
+ * Schedule a host-service restart a few seconds out via a transient systemd
+ * timer. The timer runs in its own cgroup, so it survives this unit stopping —
+ * a handler can't `systemctl restart` its own service inline (that would kill
+ * the in-flight command before the follow-up is sent). Used after /update so
+ * the /model slash choices re-register from the refreshed catalog.
+ */
+function scheduleHostRestart(): boolean {
+  try {
+    const unit = `${getSystemdUnit()}.service`;
+    const child = spawn(
+      'systemd-run',
+      ['--user', '--on-active=8s', 'systemctl', '--user', 'restart', unit],
+      { detached: true, stdio: 'ignore' },
+    );
+    child.unref();
+    log.info('runtime-control: scheduled host restart after SDK update', { unit });
+    return true;
+  } catch (err) {
+    log.warn('runtime-control: could not schedule host restart', { err });
+    return false;
+  }
 }
 
 // Populate the model catalog in the background at startup so /model reflects the
