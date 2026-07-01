@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@chat-adapter/discord':
-        specifier: 4.26.0
-        version: 4.26.0
+        specifier: 4.29.0
+        version: 4.29.0
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -75,11 +75,13 @@ importers:
 
 packages:
 
-  '@chat-adapter/discord@4.26.0':
-    resolution: {integrity: sha512-p0Xm/aPjHP9z87/tXtHz0KFmbUcu7SGPQAAlT8mrKRX49jO77Tognj/5poSmV1XQ1C4BLfxpPvTQlLNK/5omkw==}
+  '@chat-adapter/discord@4.29.0':
+    resolution: {integrity: sha512-C6pDVKn7s0PhvgeqldYxoShWXJzthwtlo+sCesqenh56M03eHsioinqxeJttmtK8y1ZD8/qiP2lAZufDwuEQhA==}
+    engines: {node: '>=20'}
 
-  '@chat-adapter/shared@4.26.0':
-    resolution: {integrity: sha512-YD0MGktFXrArUqTBsyPfL5vkdD1WBS58PAWO0oVrMQAMmPxpAXfWGjBtZCkf3y8R8Svb0uVuVXiMZSForaEnMQ==}
+  '@chat-adapter/shared@4.29.0':
+    resolution: {integrity: sha512-ARqTDoHJHKN9rpytbFPJbNmqqx3fOg5xwsTZdlingQPAssOSeHDBdqrFJkgDhyCRGbmDtG09cuS0FkVzeoh2qg==}
+    engines: {node: '>=20'}
 
   '@clack/core@1.2.0':
     resolution: {integrity: sha512-qfxof/3T3t9DPU/Rj3OmcFyZInceqj/NVtO9rwIuJqCUgh32gwPjpFQQp/ben07qKlhpwq7GzfWpST4qdJ5Drg==}
@@ -1682,23 +1684,27 @@ packages:
 
 snapshots:
 
-  '@chat-adapter/discord@4.26.0':
+  '@chat-adapter/discord@4.29.0':
     dependencies:
-      '@chat-adapter/shared': 4.26.0
-      chat: 4.26.0
+      '@chat-adapter/shared': 4.29.0
+      chat: 4.29.0
       discord-api-types: 0.37.120
       discord-interactions: 4.4.0
       discord.js: 14.26.4
     transitivePeerDependencies:
+      - ai
       - bufferutil
       - supports-color
       - utf-8-validate
+      - zod
 
-  '@chat-adapter/shared@4.26.0':
+  '@chat-adapter/shared@4.29.0':
     dependencies:
-      chat: 4.26.0
+      chat: 4.29.0
     transitivePeerDependencies:
+      - ai
       - supports-color
+      - zod
 
   '@clack/core@1.2.0':
     dependencies:
