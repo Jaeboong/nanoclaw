@@ -38,20 +38,18 @@ interface Choice {
   readonly value: string;
 }
 
-// Values are model ALIASES, not pinned version IDs, so the choice tracks the
-// latest release automatically — picking "Sonnet" gets whatever the current
-// Sonnet is (e.g. Sonnet 5) with no code change, and new versions never need a
-// hardcode bump. The alias string is forwarded verbatim to the Agent SDK's
-// query({ model }) (see container/agent-runner), which resolves it server-side.
-// (v1 fetched the full catalog live via a container's supportedModels() and
-// surfaced it through Discord autocomplete; v2's chat-SDK adapter drops
-// autocomplete interactions, so aliases give the same "always current" behavior
-// with the fixed menu the adapter requires. See docs/HARNESS.md / model-catalog.)
+// Values are model ALIASES resolved server-side by the Agent SDK, NOT pinned
+// version IDs — so a choice tracks the current release with no hardcode bump.
+// The valid aliases are exactly what the container SDK's supportedModels()
+// returns; as of agent-runner @anthropic-ai/claude-agent-sdk 0.3.170 that is
+// { default (Sonnet family), opus, haiku } — there is no standalone 'sonnet'
+// alias and no Sonnet 5 until the container SDK is upgraded. Keep this list in
+// sync with supportedModels(); the dynamic catalog (see model-catalog, v1) is
+// the proper fix so the menu + labels reflect live SDK support automatically.
 const MODEL_CHOICES: readonly Choice[] = [
-  { name: 'Default — SDK 기본(권장)', value: DEFAULT_VALUE },
-  { name: 'Opus — 최고 품질 (항상 최신)', value: 'opus' },
-  { name: 'Sonnet — 균형·효율 (항상 최신)', value: 'sonnet' },
-  { name: 'Haiku — 가장 빠름·저렴 (항상 최신)', value: 'haiku' },
+  { name: 'Default — 권장 (기본 · 현재 Sonnet 계열)', value: DEFAULT_VALUE },
+  { name: 'Opus — 최고 품질', value: 'opus' },
+  { name: 'Haiku — 가장 빠름·저렴', value: 'haiku' },
 ];
 
 const EFFORT_CHOICES: readonly Choice[] = [
