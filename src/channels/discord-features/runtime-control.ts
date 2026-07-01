@@ -38,12 +38,20 @@ interface Choice {
   readonly value: string;
 }
 
+// Values are model ALIASES, not pinned version IDs, so the choice tracks the
+// latest release automatically — picking "Sonnet" gets whatever the current
+// Sonnet is (e.g. Sonnet 5) with no code change, and new versions never need a
+// hardcode bump. The alias string is forwarded verbatim to the Agent SDK's
+// query({ model }) (see container/agent-runner), which resolves it server-side.
+// (v1 fetched the full catalog live via a container's supportedModels() and
+// surfaced it through Discord autocomplete; v2's chat-SDK adapter drops
+// autocomplete interactions, so aliases give the same "always current" behavior
+// with the fixed menu the adapter requires. See docs/HARNESS.md / model-catalog.)
 const MODEL_CHOICES: readonly Choice[] = [
-  { name: 'Opus 4.8 — 최고 품질', value: 'claude-opus-4-8' },
-  { name: 'Opus 4.7', value: 'claude-opus-4-7' },
-  { name: 'Sonnet 4.6 — 균형', value: 'claude-sonnet-4-6' },
-  { name: 'Haiku 4.5 — 빠르고 저렴', value: 'claude-haiku-4-5-20251001' },
-  { name: 'Default — SDK 기본 모델', value: DEFAULT_VALUE },
+  { name: 'Default — SDK 기본(권장)', value: DEFAULT_VALUE },
+  { name: 'Opus — 최고 품질 (항상 최신)', value: 'opus' },
+  { name: 'Sonnet — 균형·효율 (항상 최신)', value: 'sonnet' },
+  { name: 'Haiku — 가장 빠름·저렴 (항상 최신)', value: 'haiku' },
 ];
 
 const EFFORT_CHOICES: readonly Choice[] = [

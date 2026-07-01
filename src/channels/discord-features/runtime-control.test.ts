@@ -115,17 +115,17 @@ describe('/model', () => {
     seedWiredChannel();
     const { fetchImpl, calls } = recordingFetch();
 
-    await handleInteraction(modelInteraction('claude-opus-4-8'), { fetchImpl, ...admin });
+    await handleInteraction(modelInteraction('opus'), { fetchImpl, ...admin });
 
-    expect(getContainerConfig('ag-1')?.model).toBe('claude-opus-4-8');
-    expect(String((calls[0].body?.data as Record<string, unknown>).content)).toContain('Opus 4.8');
+    expect(getContainerConfig('ag-1')?.model).toBe('opus');
+    expect(String((calls[0].body?.data as Record<string, unknown>).content)).toContain('Opus');
   });
 
   it('clears the model override when "default" is chosen', async () => {
     seedWiredChannel();
     const { fetchImpl } = recordingFetch();
-    await handleInteraction(modelInteraction('claude-opus-4-8'), { fetchImpl, ...admin });
-    expect(getContainerConfig('ag-1')?.model).toBe('claude-opus-4-8');
+    await handleInteraction(modelInteraction('opus'), { fetchImpl, ...admin });
+    expect(getContainerConfig('ag-1')?.model).toBe('opus');
 
     await handleInteraction(modelInteraction('__default__'), { fetchImpl, ...admin });
     expect(getContainerConfig('ag-1')?.model).toBeNull();
@@ -144,7 +144,7 @@ describe('/model', () => {
   it('replies that the channel is not wired when no agent group resolves', async () => {
     // No seed — channel resolves to nothing.
     const { fetchImpl, calls } = recordingFetch();
-    await handleInteraction(modelInteraction('claude-opus-4-8'), { fetchImpl, ...admin });
+    await handleInteraction(modelInteraction('opus'), { fetchImpl, ...admin });
     expect(String((calls[0].body?.data as Record<string, unknown>).content)).toContain('연결');
   });
 
@@ -152,7 +152,7 @@ describe('/model', () => {
     seedWiredChannel();
     const { fetchImpl, calls } = recordingFetch();
 
-    await handleInteraction(modelInteraction('claude-opus-4-8'), { fetchImpl, isAdminImpl: () => false });
+    await handleInteraction(modelInteraction('opus'), { fetchImpl, isAdminImpl: () => false });
 
     expect(getContainerConfig('ag-1')).toBeUndefined();
     expect(String((calls[0].body?.data as Record<string, unknown>).content)).toContain('권한');
