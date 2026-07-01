@@ -20,6 +20,12 @@
  * the gateway, so v1's dynamic model autocomplete isn't available.
  */
 import { restartAgentGroupContainers } from '../../container-restart.js';
+import {
+  catalogChoices,
+  labelForModel,
+  refreshModelCatalog,
+  DEFAULT_MODEL_VALUE,
+} from '../../model-catalog.js';
 import { updateAgentSdk } from '../../sdk-update.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
@@ -32,26 +38,19 @@ import {
 } from '../discord-interactions.js';
 
 /** Sentinel choice value meaning "clear the override; use the SDK default". */
-const DEFAULT_VALUE = '__default__';
+const DEFAULT_VALUE = DEFAULT_MODEL_VALUE;
 
 interface Choice {
   readonly name: string;
   readonly value: string;
 }
 
-// Values are model ALIASES resolved server-side by the Agent SDK, NOT pinned
-// version IDs — so a choice tracks the current release with no hardcode bump.
-// The valid aliases are exactly what the container SDK's supportedModels()
-// returns; as of agent-runner @anthropic-ai/claude-agent-sdk 0.3.170 that is
-// { default (Sonnet family), opus, haiku } — there is no standalone 'sonnet'
-// alias and no Sonnet 5 until the container SDK is upgraded. Keep this list in
-// sync with supportedModels(); the dynamic catalog (see model-catalog, v1) is
-// the proper fix so the menu + labels reflect live SDK support automatically.
-const MODEL_CHOICES: readonly Choice[] = [
-  { name: 'Default — 권장 (기본 · 현재 Sonnet 계열)', value: DEFAULT_VALUE },
-  { name: 'Opus — 최고 품질', value: 'opus' },
-  { name: 'Haiku — 가장 빠름·저렴', value: 'haiku' },
-];
+// /model choices come from the live model catalog (the container SDK's
+// supportedModels(), cached to data/models-catalog.json), so new releases like
+// Sonnet 5 surface automatically and each label carries the concrete version.
+// Built at import from the cache; refreshed in the background (below) and after
+// /update, with a host restart re-reading the cache into the registered choices.
+const MODEL_CHOICES = catalogChoices();
 
 const EFFORT_CHOICES: readonly Choice[] = [
   { name: 'off — 추론 끔', value: 'off' },
@@ -62,12 +61,8 @@ const EFFORT_CHOICES: readonly Choice[] = [
   { name: 'max — 최대', value: 'max' },
 ];
 
-const MODEL_LABEL = new Map(MODEL_CHOICES.map((c) => [c.value, c.name]));
-
-function labelForModel(model: string | null): string {
-  if (!model) return 'Default (SDK 기본 모델)';
-  return MODEL_LABEL.get(model) ?? model;
-}
+// labelForModel is imported from model-catalog — it resolves a stored value
+// (or the default sentinel) to a concrete label via the live catalog.
 
 function labelForEffort(effort: string | null): string {
   return effort ?? 'off';
@@ -185,10 +180,21 @@ async function handleUpdate(_inv: SlashInvocation): Promise<SlashResult> {
       text: `업데이트 실패 (${r.from ?? '?'} → ${r.to ?? '?'}): ${r.error ?? '알 수 없는 오류'}.\n라이브 이미지는 그대로 유지됩니다.`,
     };
   }
+  // Refresh the /model catalog cache so labels reflect the new SDK's models
+  // (registered slash choices pick it up on the next host restart).
+  await refreshModelCatalog(true).catch(() => undefined);
   const models = r.models?.length ? `\n모델: ${r.models.join(', ')}` : '';
   return {
     text: `Agent SDK 업데이트 완료 — **${r.from ?? '?'} → ${r.to}**. 컨테이너 ${r.recycled ?? 0}개 재활용.${models}`,
   };
+}
+
+// Populate the model catalog in the background at startup so /model reflects the
+// live SDK's models. Choices were registered from the cache at import; this
+// keeps the cache fresh for the next host restart. Skipped under tests, which
+// must not spawn a container.
+if (!process.env.VITEST) {
+  void refreshModelCatalog().catch(() => undefined);
 }
 
 registerSlashCommand(
