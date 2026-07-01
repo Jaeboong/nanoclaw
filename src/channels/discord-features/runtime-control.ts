@@ -20,6 +20,7 @@
  * the gateway, so v1's dynamic model autocomplete isn't available.
  */
 import { restartAgentGroupContainers } from '../../container-restart.js';
+import { updateAgentSdk } from '../../sdk-update.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
@@ -174,4 +175,30 @@ registerSlashCommand(
   handleEffort,
 );
 
-export { handleModel, handleEffort, MODEL_CHOICES, EFFORT_CHOICES, DEFAULT_VALUE };
+async function handleUpdate(_inv: SlashInvocation): Promise<SlashResult> {
+  const r = await updateAgentSdk();
+  if (r.status === 'up-to-date') {
+    return { text: `이미 최신입니다 — Agent SDK **${r.to}**.` };
+  }
+  if (r.status === 'failed') {
+    return {
+      text: `업데이트 실패 (${r.from ?? '?'} → ${r.to ?? '?'}): ${r.error ?? '알 수 없는 오류'}.\n라이브 이미지는 그대로 유지됩니다.`,
+    };
+  }
+  const models = r.models?.length ? `\n모델: ${r.models.join(', ')}` : '';
+  return {
+    text: `Agent SDK 업데이트 완료 — **${r.from ?? '?'} → ${r.to}**. 컨테이너 ${r.recycled ?? 0}개 재활용.${models}`,
+  };
+}
+
+registerSlashCommand(
+  {
+    name: 'update',
+    description: 'Agent SDK를 최신 버전으로 업데이트 (컨테이너 재빌드 후 교체)',
+    requireAdmin: true,
+    deferred: true,
+  },
+  handleUpdate,
+);
+
+export { handleModel, handleEffort, handleUpdate, MODEL_CHOICES, EFFORT_CHOICES, DEFAULT_VALUE };
