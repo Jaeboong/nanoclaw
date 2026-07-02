@@ -10,6 +10,10 @@
 import { getConfig } from '../config.js';
 import { openInboundDb, getOutboundDb } from './connection.js';
 
+function log(msg: string): void {
+  console.error(`[db/messages-in] ${msg}`);
+}
+
 // Cache whether inbound.db has the on_wake column (added in v2.0.48).
 // The container opens inbound.db read-only, so it can't ALTER —
 // gracefully degrade when running against an older session DB.
@@ -127,6 +131,37 @@ export function markFailed(id: string): void {
       "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'failed', datetime('now'))",
     )
     .run(id);
+}
+
+export interface DestinationThread {
+  threadId: string | null;
+  inReplyTo: string | null;
+}
+
+/**
+ * Find the thread_id and message id of the most recent inbound message
+ * matching the given channel+platform — used to thread an outbound reply to
+ * a destination. Opens its own inbound.db connection (via openInboundDb),
+ * so it's safe to call from any process, including the MCP tools subprocess
+ * which doesn't share memory with the poll loop.
+ */
+export function resolveDestinationThread(channelType: string, platformId: string): DestinationThread | null {
+  const inbound = openInboundDb();
+  try {
+    const row = inbound
+      .prepare(
+        `SELECT thread_id, id FROM messages_in
+         WHERE channel_type = ? AND platform_id = ?
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
+    return row ? { threadId: row.thread_id, inReplyTo: row.id } : null;
+  } catch (err) {
+    log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  } finally {
+    inbound.close();
+  }
 }
 
 /** Get a message by ID (read from inbound.db). */

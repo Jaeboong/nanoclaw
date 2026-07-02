@@ -1,15 +1,14 @@
 /**
- * Tests for the core MCP tools' interaction with the per-batch routing
- * context. The agent-runner sets a current `inReplyTo` at the top of each
- * batch in poll-loop, and outbound writes from MCP tools (send_message,
- * send_file) must pick it up so a2a return-path routing on the host can
- * correlate replies back to the originating session.
+ * Tests for the core MCP tools' in_reply_to resolution. send_message and
+ * send_file run in the MCP tools subprocess, which shares no memory with
+ * the poll loop — so in_reply_to must be resolved by reading inbound.db
+ * directly (mirroring the final <message> block's dispatch), not from an
+ * in-process value set by the poll loop.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { setCurrentInReplyTo, clearCurrentInReplyTo } from '../current-batch.js';
 import { sendMessage } from './core.js';
 
 beforeEach(() => {
@@ -24,13 +23,17 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearCurrentInReplyTo();
   closeSessionDb();
 });
 
 describe('send_message MCP tool — in_reply_to plumbing', () => {
-  it('stamps current batch in_reply_to on outbound rows', async () => {
-    setCurrentInReplyTo('inbound-msg-1');
+  it('stamps in_reply_to from the most recent matching inbound row', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, channel_type, platform_id, content)
+         VALUES ('inbound-msg-1', 1, 'chat', '2026-01-01T00:00:00Z', 'agent', 'ag-peer', '{}')`,
+      )
+      .run();
 
     await sendMessage.handler({ to: 'peer', text: 'hello' });
 
@@ -39,8 +42,7 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     expect(out[0].in_reply_to).toBe('inbound-msg-1');
   });
 
-  it('writes null when no batch is active', async () => {
-    // No setCurrentInReplyTo before this call — simulates ad-hoc / out-of-batch invocation.
+  it('writes null when no inbound row matches the destination', async () => {
     await sendMessage.handler({ to: 'peer', text: 'hello' });
 
     const out = getUndeliveredMessages();
