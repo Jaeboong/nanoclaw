@@ -436,6 +436,109 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
   });
+
+  it('does not nudge (or duplicate) when send_message already delivered this segment', async () => {
+    // Simulates the agent calling send_message mid-turn (writes messages_out
+    // directly, as the MCP tools subprocess does) and then closing the turn
+    // with plain scratchpad text instead of a <message> block. The turn's
+    // content already reached the user — nudging "not delivered" here would
+    // make the agent re-send the same content, producing a real duplicate.
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      writeMessageOut({
+        id: 'tool-send-1',
+        in_reply_to: 'm1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: 'delivered via send_message' }),
+      });
+      yield { type: 'result', text: 'ok, sent it above' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => pushes.push(m),
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('delivered via send_message');
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('does not duplicate when the same content is sent via send_message and then repeated in a wrapped <message> block', async () => {
+    // This is the actual mechanism behind the real-world duplicate: the
+    // agent calls send_message(text) mid-turn, then also closes the turn
+    // with a <message to="..."> block containing the exact same text. No
+    // nudge is involved — dispatchResultText must catch this directly.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('discord-test', 'discord-test', 'channel', 'discord', 'chan-1', NULL)`,
+      )
+      .run();
+
+    const sameText = 'the full answer, sent twice';
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      writeMessageOut({
+        id: 'tool-send-1',
+        in_reply_to: null,
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: sameText }),
+      });
+      yield { type: 'result', text: `<message to="discord-test">${sameText}</message>` };
+    }
+    const query: AgentQuery = {
+      push: () => {},
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    const matching = out.filter((m) => JSON.parse(m.content).text === sameText);
+    expect(matching).toHaveLength(1);
+  });
+
+  it('still delivers identical text to multiple distinct destinations in one response', async () => {
+    // The dedup guard is scoped per-destination (platform_id + channel_type),
+    // not by text alone — broadcasting the same text to several destinations
+    // in one response (a documented pattern) must still reach all of them.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('discord-a', 'discord-a', 'channel', 'discord', 'chan-a', NULL),
+                ('discord-b', 'discord-b', 'channel', 'discord', 'chan-b', NULL)`,
+      )
+      .run();
+
+    const sameText = 'broadcast to both';
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: `<message to="discord-a">${sameText}</message><message to="discord-b">${sameText}</message>`,
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    const matching = out.filter((m) => JSON.parse(m.content).text === sameText);
+    expect(matching).toHaveLength(2);
+    expect(matching.map((m) => m.platform_id).sort()).toEqual(['chan-a', 'chan-b']);
+  });
 });
 
 describe('isCorruptionError', () => {

@@ -126,5 +126,9 @@ function buildDestinationsSection(): string {
   lines.push(
     'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );
+  lines.push('');
+  lines.push(
+    "Never send the same content twice: if you already delivered the answer via `send_message`, don't also repeat it in a closing `<message>` block — wrap the rest of the turn in `<internal>` instead. Each piece of content should go out through exactly one of these paths.",
+  );
   return lines.join('\n');
 }

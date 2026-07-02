@@ -1,9 +1,14 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  resolveDestinationThread,
+  type MessageInRow,
+} from './db/messages-in.js';
+import { getMaxOutboundSeq, wasTextAlreadySent, writeMessageOut } from './db/messages-out.js';
+import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
   extractRouting,
@@ -235,9 +240,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
     try {
       const result = await processQuery(
         query,
@@ -274,8 +276,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         thread_id: routing.threadId,
         content: JSON.stringify({ text: `Error: ${errMsg}` }),
       });
-    } finally {
-      clearCurrentInReplyTo();
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -340,6 +340,13 @@ export async function processQuery(
   // the same prompt again. Unused (and unmaintained) when the provider
   // doesn't implement `onExchangeComplete`.
   const archivePrompts: string[] = [initialPrompt];
+  // Baseline for detecting a mid-segment send_message/send_file call (MCP
+  // tools subprocess, writes messages_out directly). Reset whenever a new
+  // prompt segment starts. Used to tell a genuinely unwrapped response apart
+  // from one that already delivered its content via the tool and is just
+  // closing the turn with unwrapped scratchpad text — see the `result`
+  // handler below.
+  let segmentStartSeq = getMaxOutboundSeq();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -418,6 +425,7 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        segmentStartSeq = getMaxOutboundSeq();
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -482,7 +490,7 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, segmentStartSeq);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -497,12 +505,22 @@ export async function processQuery(
             });
             archivePrompts.shift();
           } else {
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            // An unwrapped result doesn't mean nothing was delivered this
+            // segment — the agent may have already sent the content via
+            // send_message/send_file (MCP tools subprocess, writes
+            // messages_out directly) before closing the turn with plain
+            // scratchpad text. Nudging "not delivered" in that case makes
+            // the agent re-send the same content wrapped, producing a real
+            // duplicate. Treat it as delivered if messages_out grew since
+            // this segment started.
+            const alreadyDeliveredViaTool = hasUnwrapped && getMaxOutboundSeq() > segmentStartSeq;
+            const effectiveHasUnwrapped = hasUnwrapped && !alreadyDeliveredViaTool;
+            const willRetryWrapping = effectiveHasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped ? 'undelivered' : 'completed',
+              status: effectiveHasUnwrapped ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -599,8 +617,18 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
  *
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
+ *
+ * `sinceSeq` is the outbound seq baseline for this turn segment. A block
+ * whose exact text was already written after that baseline (e.g. the agent
+ * called send_message with the same content earlier this turn, then
+ * repeated it in the closing block) is treated as already delivered rather
+ * than sent again — otherwise the user gets the same message twice.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  sinceSeq: number,
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -622,7 +650,7 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    sendToDestination(dest, body, routing, sinceSeq);
     sent++;
   }
   if (lastIndex < text.length) {
@@ -642,9 +670,22 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
   return { sent, hasUnwrapped };
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+/**
+ * `sinceSeq` is the outbound seq baseline for this turn segment. If the
+ * exact same text was already sent to this destination after that baseline
+ * (e.g. the agent called send_message with the same content earlier this
+ * turn, then repeated it in the closing block), skip the write — otherwise
+ * the user gets the same message twice. Scoped per-destination so
+ * broadcasting identical text to several destinations still delivers to
+ * all of them.
+ */
+function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext, sinceSeq: number): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  if (wasTextAlreadySent(body, platformId, channelType, sinceSeq)) {
+    log(`Skipping send to "${dest.name}" — identical content already sent to this destination this turn`);
+    return;
+  }
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single
@@ -659,30 +700,6 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
     thread_id: destRouting?.threadId ?? null,
     content: JSON.stringify({ text: body }),
   });
-}
-
-/**
- * Find the thread_id and message id from the most recent inbound message
- * matching the given channel+platform. Returns null if no match found.
- */
-function resolveDestinationThread(
-  channelType: string,
-  platformId: string,
-): { threadId: string | null; inReplyTo: string | null } | null {
-  try {
-    const db = getInboundDb();
-    const row = db
-      .prepare(
-        `SELECT thread_id, id FROM messages_in
-         WHERE channel_type = ? AND platform_id = ?
-         ORDER BY seq DESC LIMIT 1`,
-      )
-      .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
-    if (row) return { threadId: row.thread_id, inReplyTo: row.id };
-  } catch (err) {
-    log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return null;
 }
 
 function sleep(ms: number): Promise<void> {

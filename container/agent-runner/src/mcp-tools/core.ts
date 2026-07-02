@@ -9,9 +9,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getCurrentInReplyTo } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { resolveDestinationThread } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -118,7 +118,7 @@ export const sendMessage: McpToolDefinition = {
     const id = generateId();
     const seq = writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: resolveDestinationThread(routing.channel_type, routing.platform_id)?.inReplyTo ?? null,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -165,7 +165,7 @@ export const sendFile: McpToolDefinition = {
 
     writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: resolveDestinationThread(routing.channel_type, routing.platform_id)?.inReplyTo ?? null,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,

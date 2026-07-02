@@ -131,6 +131,37 @@ export function getRoutingBySeq(
   return outRow ?? null;
 }
 
+/**
+ * Current max seq in messages_out. Used to detect whether anything was
+ * written (e.g. via the send_message/send_file MCP tools, which run in a
+ * separate subprocess) since some earlier point in the turn.
+ */
+export function getMaxOutboundSeq(): number {
+  return (getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+}
+
+/**
+ * True if a chat message with this exact text was already written to this
+ * same destination (platform_id + channel_type) after `sinceSeq`. Catches
+ * the agent delivering the same content twice to the same place in one
+ * turn — e.g. calling send_message mid-turn and then repeating the same
+ * text in the closing <message> block. Scoped per-destination (not just by
+ * text) so broadcasting identical text to several destinations in one
+ * response still delivers to all of them.
+ */
+export function wasTextAlreadySent(text: string, platformId: string, channelType: string, sinceSeq: number): boolean {
+  const rows = getOutboundDb()
+    .prepare(`SELECT content FROM messages_out WHERE seq > ? AND kind = 'chat' AND platform_id = ? AND channel_type = ?`)
+    .all(sinceSeq, platformId, channelType) as { content: string }[];
+  return rows.some((r) => {
+    try {
+      return (JSON.parse(r.content) as { text?: string }).text === text;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** Get undelivered messages (for host polling — reads from outbound.db). */
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()
