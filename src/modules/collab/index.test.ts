@@ -160,6 +160,13 @@ describe('collabInterceptor', () => {
     expect(routeInboundMock).not.toHaveBeenCalled();
   });
 
+  it('a direct @-mention of this bot overrides responder=codex (재붕봇 answers)', async () => {
+    setResponder(MG, 'codex', 'discord:owner');
+    const ev = discordEvent('hey');
+    const mentioned: InboundEvent = { ...ev, message: { ...ev.message, isMention: true } };
+    expect(await collabInterceptor(mentioned)).toBe(false);
+  });
+
   it('responder=claude (default) passes through', async () => {
     expect(await collabInterceptor(discordEvent('hello'))).toBe(false);
   });

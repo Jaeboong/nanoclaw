@@ -227,7 +227,12 @@ export async function collabInterceptor(event: InboundEvent): Promise<boolean> {
     return true;
   }
 
-  // No active collab — apply the responder toggle.
+  // No active collab — apply the responder toggle, but a direct @-mention of
+  // THIS bot (재붕봇) always forces a response, overriding the toggle. Restores
+  // the v1 fork behavior: tagging a specific bot makes only that bot answer,
+  // regardless of /responder (e.g. /responder codex + `<@재붕봇>` → 재붕봇 answers).
+  // `event.message.isMention` is the adapter's platform-confirmed mention of us.
+  if (event.message.isMention === true) return false;
   if (getResponder(mg.id) === 'codex') return true;
   return false;
 }
