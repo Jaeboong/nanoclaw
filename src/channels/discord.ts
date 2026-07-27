@@ -15,6 +15,8 @@ import { deliverSectionEmbeds } from './discord-features/section-outbound.js';
 // import (side-effect), populating the interaction registry before
 // registerSlashCommandsWithDiscord runs below.
 import './discord-features/runtime-control.js';
+import './discord-features/thread-command.js';
+import { suppressMentionAutoThread } from './discord-features/suppress-mention-thread.js';
 
 // Our own agent replies are delivered as colored embeds with empty message
 // `content` (see section-outbound), so when a message quotes one, its text
@@ -48,6 +50,9 @@ registerChannelAdapter('discord', {
       publicKey: env.DISCORD_PUBLIC_KEY,
       applicationId: env.DISCORD_APPLICATION_ID,
     });
+    // Additive: disable the upstream adapter's auto-thread-on-mention so mentions
+    // answer in the root channel. On-demand threads come from /thread instead.
+    suppressMentionAutoThread(discordAdapter);
     const botToken = env.DISCORD_BOT_TOKEN;
     const applicationId = env.DISCORD_APPLICATION_ID ?? '';
 
