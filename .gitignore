@@ -1,6 +1,8 @@
 # Dependencies
 node_modules/
 .npm-cache/
+# pnpm content-addressable store (created when running in sandbox mode)
+.pnpm-store/
 # Build output
 dist/
 
@@ -8,23 +10,20 @@ dist/
 store/
 data/
 logs/
-nanoclaw.pid
 
-# Groups - only track base structure and specific CLAUDE.md files
+# Groups - per-installation state, not tracked
 groups/*
-!groups/main/
-!groups/global/
-groups/main/*
-groups/global/*
-!groups/main/CLAUDE.md
-!groups/global/CLAUDE.md
+
+# Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
+# per-group memory (CLAUDE.local.md) must never be committed.
+**/CLAUDE.local.md
+**/.claude-shared.md
+**/.claude-fragments/
 
 # Secrets
 *.keys.json
 .env
-
-# Personal tone overrides (loaded at runtime via NANOCLAW_TONE; see src/tone/messages.ts)
-src/tone/ddonyang.ts
+.env*
 
 # Temp files
 .tmp-*
@@ -40,16 +39,10 @@ src/tone/ddonyang.ts
 .nanoclaw/
 
 agents-sdk-docs
+.agents
+AGENTS.md
 
-# Personal completed-plan notes (per-installation context; channel IDs, project names)
-docs/plans/completed_plans/
-
-# Boundary harness — instance-tier directories under ops/ (see docs/HARNESS.md)
-ops/**/instances/
-ops/**/local/
-
-# Boundary harness — user-maintained leakage blocklist for npm run check:boundaries
-.boundaries-blocklist
-
-# Personal observability artifacts (project-specific dashboards, host overlays)
-ops/observability-host/grafana/dashboards/jasojeon-*.json
+# Internal working docs, never committed
+docs/maintainer-guide.md
+docs/drafts/
+forks.md

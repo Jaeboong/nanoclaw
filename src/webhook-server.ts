@@ -1,407 +1,176 @@
-import http from 'node:http';
-import crypto from 'node:crypto';
+/**
+ * Minimal HTTP server for Chat SDK adapter webhooks.
+ *
+ * Starts lazily on first adapter registration. Routes requests by path:
+ *   /webhook/{adapterName} → chat.webhooks[adapterName](request)
+ *   /webhook/{path}        → raw handler from registerWebhookHandler(path, ...)
+ *
+ * Multiple Chat instances can register adapters — each adapter name maps
+ * to its owning Chat instance. Raw routes let modules receive non-Chat-SDK
+ * webhooks (GitHub, payment providers, health checks) on the same server
+ * without editing this file or opening a second port.
+ */
+import http from 'http';
 
-import { storeChatMetadata, storeMessage } from './db.js';
-import { logger } from './logger.js';
-import { NewMessage } from './types.js';
+import type { Chat } from 'chat';
 
-export interface WebhookServerOpts {
-  port: number;
-  token: string;
-  grafanaJid: string;
-  grafanaChatName: string;
-  /** Optional: GitLab webhook receiver. */
-  gitlabJid?: string;
-  gitlabChatName?: string;
-  gitlabSecret?: string;
-  /**
-   * Optional: server-side handler for GitLab events. When set, GitLab
-   * webhook payloads are passed to this callback (parse + persist
-   * suggestions + refresh pin) and **no synthetic chat message is stored**
-   * — the bot is not woken up. When unset, falls back to the legacy
-   * synthetic-message path so debugging still surfaces unhandled events.
-   */
-  onGitlabEvent?: (
-    payload: unknown,
-    eventHeader: string,
-  ) => Promise<{ summary: string }>;
-  /** Prepended to synthetic alert content so it passes the message-loop trigger gate. */
-  triggerPrefix: string;
+import { log } from './log.js';
+
+const DEFAULT_PORT = 3000;
+
+interface WebhookEntry {
+  chat: Chat;
+  adapterName: string;
 }
 
-const MAX_BODY_BYTES = 256 * 1024;
+/** Node-style handler for raw (non-Chat-SDK) webhook routes. */
+export type RawWebhookHandler = (req: http.IncomingMessage, res: http.ServerResponse) => void | Promise<void>;
 
-export function startWebhookServer(opts: WebhookServerOpts): http.Server {
-  const server = http.createServer((req, res) => {
-    handle(req, res, opts).catch((err) => {
-      logger.error({ err }, 'Webhook handler crashed');
-      try {
-        if (!res.headersSent) {
-          res.writeHead(500);
-          res.end('internal error');
-        }
-      } catch {
-        /* response already closed */
-      }
-    });
-  });
-  server.listen(opts.port, '0.0.0.0', () => {
-    logger.info({ port: opts.port }, 'Webhook server listening');
-  });
-  return server;
-}
+const routes = new Map<string, WebhookEntry>();
+const rawRoutes = new Map<string, RawWebhookHandler>();
+let server: http.Server | null = null;
 
-async function handle(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  opts: WebhookServerOpts,
-): Promise<void> {
-  if (req.method !== 'POST') {
-    res.writeHead(405);
-    res.end('method not allowed');
-    return;
-  }
-  const url = new URL(req.url ?? '', 'http://x');
-  const isGitlab = url.pathname === '/gitlab-webhook';
-  const isGrafana = url.pathname === '/grafana-alert';
-  if (!isGitlab && !isGrafana) {
-    res.writeHead(404);
-    res.end('not found');
-    return;
-  }
-  if (isGrafana) {
-    const provided = url.searchParams.get('token') ?? '';
-    if (!constantTimeEquals(provided, opts.token)) {
-      res.writeHead(401);
-      res.end('unauthorized');
-      logger.warn(
-        { remote: req.socket.remoteAddress, path: url.pathname },
-        'Webhook auth rejected',
-      );
-      return;
-    }
-  } else if (isGitlab) {
-    if (!opts.gitlabJid || !opts.gitlabSecret) {
-      res.writeHead(503);
-      res.end('gitlab webhook not configured');
-      return;
-    }
-    const queryToken = url.searchParams.get('token') ?? '';
-    const headerToken =
-      typeof req.headers['x-gitlab-token'] === 'string'
-        ? (req.headers['x-gitlab-token'] as string)
-        : '';
-    const presented = headerToken || queryToken;
-    if (!constantTimeEquals(presented, opts.gitlabSecret)) {
-      res.writeHead(401);
-      res.end('unauthorized');
-      logger.warn(
-        { remote: req.socket.remoteAddress, path: url.pathname },
-        'GitLab webhook auth rejected',
-      );
-      return;
-    }
-  }
-
+/** Convert Node.js IncomingMessage to a Web API Request. */
+async function toWebRequest(req: http.IncomingMessage): Promise<Request> {
   const chunks: Buffer[] = [];
-  let total = 0;
   for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.length;
-    if (total > MAX_BODY_BYTES) {
-      res.writeHead(413);
-      res.end('payload too large');
+    chunks.push(chunk as Buffer);
+  }
+  const body = Buffer.concat(chunks);
+
+  const host = req.headers.host || 'localhost';
+  const url = `http://${host}${req.url}`;
+
+  const headers: Record<string, string> = {};
+  for (const [key, val] of Object.entries(req.headers)) {
+    if (typeof val === 'string') headers[key] = val;
+    else if (Array.isArray(val)) headers[key] = val.join(', ');
+  }
+
+  const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+  return new Request(url, {
+    method: req.method || 'GET',
+    headers,
+    body: hasBody ? body : undefined,
+  });
+}
+
+/** Write a Web API Response back to a Node.js ServerResponse. */
+async function fromWebResponse(webRes: Response, nodeRes: http.ServerResponse): Promise<void> {
+  nodeRes.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
+  if (webRes.body) {
+    const reader = webRes.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        nodeRes.write(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  nodeRes.end();
+}
+
+/**
+ * Register a webhook adapter on the shared server.
+ * Starts the server lazily on first call.
+ *
+ * `routingPath` is the URL segment (`/webhook/<routingPath>`); `adapterName`
+ * stays the handler key into `chat.webhooks`. The split lets N instances of
+ * one platform (each with its own Chat + signing secret) listen on distinct
+ * URLs while dispatching to the same SDK adapter name. Defaulting
+ * routingPath to adapterName keeps the historical single-instance route
+ * byte-identical. Signature adopted verbatim from PR #2617 (@davekim917's
+ * #1804 prototype) so the two changes converge textually.
+ */
+export function registerWebhookAdapter(chat: Chat, adapterName: string, routingPath: string = adapterName): void {
+  routes.set(routingPath, { chat, adapterName });
+  ensureServer();
+  log.info('Webhook adapter registered', { adapter: adapterName, path: `/webhook/${routingPath}` });
+}
+
+/**
+ * Register a raw Node-style handler at /webhook/{path} on the shared server.
+ *
+ * For webhooks that don't flow through a Chat SDK adapter (GitHub, payment
+ * providers, health checks): modules register their endpoint here instead of
+ * editing this file or standing up a second HTTP server on another port.
+ * The handler owns the request/response directly.
+ *
+ * Starts the server lazily on first call.
+ */
+export function registerWebhookHandler(path: string, handler: RawWebhookHandler): void {
+  rawRoutes.set(path, handler);
+  ensureServer();
+  log.info('Webhook handler registered', { path: `/webhook/${path}` });
+}
+
+function ensureServer(): void {
+  if (server) return;
+
+  const port = parseInt(process.env.WEBHOOK_PORT || String(DEFAULT_PORT), 10);
+
+  server = http.createServer(async (req, res) => {
+    const url = req.url || '/';
+
+    // Route: /webhook/{adapterName}
+    const match = url.match(/^\/webhook\/([^/?]+)/);
+    if (!match) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
       return;
     }
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString('utf-8');
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    res.writeHead(400);
-    res.end('invalid json');
-    return;
-  }
 
-  const now = new Date().toISOString();
-  let targetJid: string;
-  let chatName: string;
-  let text: string;
-  let sender: string;
-  let senderName: string;
-  let idPrefix: string;
-  let logExtra: Record<string, unknown>;
+    const adapterName = match[1];
 
-  if (isGitlab) {
-    const eventHeader =
-      typeof req.headers['x-gitlab-event'] === 'string'
-        ? (req.headers['x-gitlab-event'] as string)
-        : '';
-    // Preferred path: server-side handler builds suggestions silently.
-    if (opts.onGitlabEvent) {
-      try {
-        const result = await opts.onGitlabEvent(payload, eventHeader);
-        logger.info(
-          { event: eventHeader, summary: result.summary },
-          'GitLab webhook handled server-side',
-        );
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, summary: result.summary }));
+    try {
+      // Raw routes take priority — the handler writes the response itself.
+      const rawHandler = rawRoutes.get(adapterName);
+      if (rawHandler) {
+        await rawHandler(req, res);
         return;
-      } catch (err) {
-        logger.error(
-          { err, event: eventHeader },
-          'GitLab handler crashed — falling back to chat',
-        );
-        // fall through to legacy chat-message path
+      }
+
+      const entry = routes.get(adapterName);
+      if (!entry) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end(`Unknown adapter: ${adapterName}`);
+        return;
+      }
+
+      const webReq = await toWebRequest(req);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const webhooks = entry.chat.webhooks as Record<string, (r: Request, opts?: any) => Promise<Response>>;
+      const handler = webhooks[entry.adapterName];
+      const webRes = await handler(webReq, {
+        waitUntil: (p: Promise<unknown>) => {
+          p.catch(() => {});
+        },
+      });
+      await fromWebResponse(webRes, res);
+    } catch (err) {
+      log.error('Webhook handler error', { adapter: adapterName, url: req.url, err });
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
       }
     }
-    const formatted = formatGitlabEvent(payload, eventHeader);
-    if (!formatted) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, skipped: true }));
-      return;
-    }
-    targetJid = opts.gitlabJid as string;
-    chatName = opts.gitlabChatName ?? 'GitLab';
-    text = formatted;
-    sender = 'gitlab-webhook';
-    senderName = 'GitLab';
-    idPrefix = 'gitlab-event';
-    logExtra = { event: eventHeader };
-  } else {
-    targetJid = opts.grafanaJid;
-    chatName = opts.grafanaChatName;
-    text = formatGrafanaAlert(payload);
-    sender = 'grafana-webhook';
-    senderName = 'Grafana';
-    idPrefix = 'grafana-alert';
-    logExtra = { status: extractStatus(payload) };
+  });
+
+  server.listen(port, '0.0.0.0', () => {
+    log.info('Webhook server started', { port, adapters: [...routes.keys()] });
+  });
+}
+
+/** Shut down the webhook server. */
+export async function stopWebhookServer(): Promise<void> {
+  if (server) {
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+    routes.clear();
+    rawRoutes.clear();
+    log.info('Webhook server stopped');
   }
-
-  storeChatMetadata(targetJid, now, chatName, 'discord', true);
-
-  // Prepend the bot trigger so this synthetic message passes the message-loop
-  // trigger gate (the channel is set to requires_trigger=1 to silence the bot
-  // on user chitchat). is_from_me=true lets it bypass the sender allowlist.
-  const triggered = `${opts.triggerPrefix} ${text}`;
-  const msg: NewMessage = {
-    id: `${idPrefix}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
-    chat_jid: targetJid,
-    sender,
-    sender_name: senderName,
-    content: triggered,
-    timestamp: now,
-    is_from_me: true,
-    is_bot_message: false,
-  };
-  storeMessage(msg);
-  logger.info(
-    { jid: targetJid, msgId: msg.id, ...logExtra },
-    'Webhook stored event',
-  );
-
-  res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, id: msg.id }));
-}
-
-function constantTimeEquals(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-interface GrafanaAlert {
-  status?: string;
-  labels?: Record<string, string>;
-  annotations?: Record<string, string>;
-  valueString?: string;
-  startsAt?: string;
-  endsAt?: string;
-  generatorURL?: string;
-}
-
-interface GrafanaAlertPayload {
-  status?: string;
-  alerts?: GrafanaAlert[];
-}
-
-function extractStatus(payload: unknown): string {
-  if (payload && typeof payload === 'object') {
-    const p = payload as GrafanaAlertPayload;
-    return p.status ?? 'unknown';
-  }
-  return 'unknown';
-}
-
-interface GitlabPushPayload {
-  object_kind?: string;
-  ref?: string;
-  before?: string;
-  after?: string;
-  user_name?: string;
-  user_username?: string;
-  project?: { name?: string; web_url?: string };
-  commits?: Array<{
-    id?: string;
-    message?: string;
-    title?: string;
-    url?: string;
-    author?: { name?: string };
-  }>;
-  total_commits_count?: number;
-}
-
-interface GitlabMRPayload {
-  object_kind?: string;
-  user?: { name?: string; username?: string };
-  project?: { name?: string; web_url?: string };
-  object_attributes?: {
-    iid?: number;
-    title?: string;
-    state?: string;
-    action?: string;
-    source_branch?: string;
-    target_branch?: string;
-    url?: string;
-    last_commit?: { id?: string; message?: string };
-    merge_commit_sha?: string;
-  };
-}
-
-const DEV_BRANCH_REFS = new Set(['refs/heads/dev', 'refs/heads/develop']);
-
-function formatGitlabEvent(
-  payload: unknown,
-  eventHeader: string,
-): string | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const kind =
-    (payload as { object_kind?: string }).object_kind ??
-    (eventHeader || '').toLowerCase().replace(/ hook$/, '');
-
-  if (kind === 'push' || eventHeader === 'Push Hook') {
-    return formatGitlabPush(payload as GitlabPushPayload);
-  }
-  if (kind === 'merge_request' || eventHeader === 'Merge Request Hook') {
-    return formatGitlabMR(payload as GitlabMRPayload);
-  }
-  // Unknown event — silently skip (return null = caller acks but doesn't post).
-  return null;
-}
-
-function formatGitlabPush(p: GitlabPushPayload): string | null {
-  const ref = p.ref ?? '';
-  if (!DEV_BRANCH_REFS.has(ref)) return null; // only dev branch matters
-  const commits = Array.isArray(p.commits) ? p.commits : [];
-  if (commits.length === 0) return null;
-
-  const branch = ref.replace(/^refs\/heads\//, '');
-  const proj = p.project?.name ?? '?';
-  const who = p.user_name ?? p.user_username ?? '?';
-  const lines: string[] = [];
-  lines.push(
-    `**GitLab Push** — \`${proj}\` / \`${branch}\` (${commits.length}커밋, by ${who})`,
-  );
-  lines.push('');
-  for (const c of commits.slice(0, 10)) {
-    const sha = (c.id ?? '').slice(0, 7);
-    const title = (c.title ?? c.message ?? '').split('\n')[0].trim();
-    const author = c.author?.name ?? '';
-    lines.push(`- \`${sha}\` ${title}${author ? ` _(${author})_` : ''}`);
-  }
-  if (commits.length > 10) lines.push(`- … +${commits.length - 10} more`);
-  lines.push('');
-  lines.push(
-    `이 커밋들 dev 브랜치에 들어왔다. 머지 커밋이면 어떤 브랜치/이슈에서 왔는지 파악하고, 매칭되는 Jira 이슈가 있으면 후보를 사용자에게 보고해라 (자동 액션 X — 매칭 후보만 알려라).`,
-  );
-  return lines.join('\n');
-}
-
-function formatGitlabMR(p: GitlabMRPayload): string | null {
-  const a = p.object_attributes ?? {};
-  const target = a.target_branch ?? '';
-  if (target !== 'dev' && target !== 'develop') return null;
-  const action = a.action ?? '';
-  const state = a.state ?? '';
-  // Only care about merged or open transitions
-  if (action !== 'merge' && action !== 'open' && action !== 'reopen')
-    return null;
-
-  const proj = p.project?.name ?? '?';
-  const iid = a.iid ?? '?';
-  const title = a.title ?? '(no title)';
-  const src = a.source_branch ?? '?';
-  const who = p.user?.name ?? p.user?.username ?? '?';
-  const url = a.url ?? '';
-
-  const verb =
-    action === 'merge' ? '머지됨' : action === 'open' ? '열림' : '재오픈';
-  const lines: string[] = [];
-  lines.push(`**GitLab MR ${verb}** — \`${proj}\` !${iid}: ${title}`);
-  lines.push(
-    `- 브랜치: \`${src}\` → \`${target}\` (state: ${state}, by ${who})`,
-  );
-  if (url) lines.push(`- 링크: ${url}`);
-  if (action === 'merge') {
-    lines.push('');
-    lines.push(
-      `이 MR이 dev 에 머지됐다. 브랜치명/타이틀에서 매칭되는 Jira 이슈를 추정하고, 후보가 있으면 "PROJ-?? 를 \`Code Review → Done\`으로 옮길까?" 형태로 사용자에게 확인 요청해라. 자동 전이 X.`,
-    );
-  } else {
-    lines.push('');
-    lines.push(
-      `MR 새로 ${verb}. 매칭되는 Jira 이슈를 \`In Progress\`로 옮겨야 할지 사용자한테 한 줄로 묻기만 해라.`,
-    );
-  }
-  return lines.join('\n');
-}
-
-function formatGrafanaAlert(payload: unknown): string {
-  const p =
-    payload && typeof payload === 'object'
-      ? (payload as GrafanaAlertPayload)
-      : ({} as GrafanaAlertPayload);
-  const status = p.status ?? 'unknown';
-  const alerts = Array.isArray(p.alerts) ? p.alerts : [];
-  const isResolved = status.toLowerCase() === 'resolved';
-
-  if (alerts.length === 0) {
-    return `**Grafana Webhook** (status: ${status})\n\n_payload에 alerts 없음_`;
-  }
-
-  const lines: string[] = [];
-  lines.push(
-    `**Grafana 알림 ${isResolved ? '해소' : '발화'}** — ${alerts.length}건 (status: ${status})`,
-  );
-
-  for (const a of alerts) {
-    const name = a.labels?.alertname ?? '(unnamed)';
-    const aStatus = a.status ?? status;
-    lines.push('');
-    lines.push(`### ${name} \`${aStatus}\``);
-    if (a.annotations?.summary) lines.push(`- 요약: ${a.annotations.summary}`);
-    if (a.annotations?.description)
-      lines.push(`- 상세: ${a.annotations.description}`);
-    if (a.valueString) lines.push(`- 값: ${a.valueString}`);
-    if (a.startsAt) lines.push(`- 시작: ${a.startsAt}`);
-    if (a.endsAt && !a.endsAt.startsWith('0001-01-01'))
-      lines.push(`- 종료: ${a.endsAt}`);
-    const labelPairs = Object.entries(a.labels ?? {})
-      .filter(([k]) => k !== 'alertname')
-      .map(([k, v]) => `\`${k}=${v}\``)
-      .join(' ');
-    if (labelPairs) lines.push(`- 라벨: ${labelPairs}`);
-    if (a.generatorURL) lines.push(`- 링크: ${a.generatorURL}`);
-  }
-
-  lines.push('');
-  lines.push(
-    isResolved
-      ? '알람이 해소됐다. 짧게 확인 메시지만 보내라.'
-      : '이 알람의 원인 추정 + 영향 범위 + 권장 대응을 한국어로 간결히 보고해라.',
-  );
-
-  return lines.join('\n');
 }

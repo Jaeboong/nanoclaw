@@ -1,90 +1,109 @@
-# Boundary Harness — Common vs Personal
+# Instance-Level Customizations (this host only)
 
-Every change to this repository falls into one of three tiers. The harness exists so any contributor — human or agent — can place a change in the correct tier without guessing, and so personal data does not accidentally end up in version control.
+This file tracks changes that are **specific to this install's host environment** and
+are **not meant to be upstreamed**. They modify core files, so when upstream nanoclaw
+updates are brought in (via `/update-nanoclaw` or `/migrate-nanoclaw` — never raw
+`git merge`, per the CLAUDE.md banner), each entry here must be **re-applied / verified**.
 
-## Three tiers
+Tier vocabulary: **core** (upstream-owned source), **module** (skill/branch-installed),
+**instance** (this host only — listed below).
 
-| Tier | Definition | Goes to git? | Examples in this repo |
-|---|---|---|---|
-| **core** | Common runtime and contracts that every install needs. Generic, parameterized, no project- or user-specific values. | Yes | `src/`, `container/`, `setup/`, top-level configs |
-| **module** | Opt-in, reusable unit (capability, integration, parser, dashboard template). Must be parameterized so any user can adopt it. | Yes | `.claude/skills/`, `container/skills/`, `ops/<area>/modules/` |
-| **instance** | Concrete instantiation by a specific user or project. Holds channel IDs, project names, host paths, secrets, hand-tuned dashboards. | **No** (gitignored) | `groups/<name>/`, `.env`, `.nanoclaw/`, `ops/<area>/instances/`, `src/tone/<personal>.ts` |
+---
 
-The boundary already exists culturally in the repo — `.gitignore` blocks `groups/*`, `.env`, `src/tone/ddonyang.ts`, `docs/plans/completed_plans/`, etc. This document makes the rule explicit.
+## 1. OneCLI gateway reachable via OneCLI's bridge IP (Linux/UFW)
 
-## Decision tree
+- **File:** `src/container-runtime.ts` → `hostGatewayArgs()` (+ helper `resolveOnecliBridgeIp()`)
+- **Tier:** instance (host-specific Linux/UFW + OneCLI compose-network isolation)
+- **Date:** 2026-06-21 (originally found & fixed 2026-04-18 on the v1 install)
 
-When adding or modifying a file, ask in order:
+**Problem.** The OneCLI gateway runs on its own compose network (`onecli_onecli`).
+Agent containers on the default `bridge` network can't reach it through the published
+host port (`host.docker.internal` → `172.17.0.1:10255`): UFW (`INPUT` policy `DROP`) +
+`DOCKER-ISOLATION-STAGE-2` drop the container→host-gateway / cross-bridge traffic.
+Symptom: agent-runner logs spam `Error: API retry (retryable: true)`; channels show
+`EHOSTUNREACH`. (Note: the published port shows as `LISTEN 0.0.0.0:10255` on the host,
+so the gateway looks healthy — the break is purely in the container→host path.)
 
-1. **Is the value identifiable to a single user, project, or deployment?**
-   (channel ID, hostname, project name, host filesystem path, personal preference, secret)
-   → **instance.** Place under an `instances/`, `local/`, or already-ignored area. Do not commit.
+**Fix.** Map `host.docker.internal` to OneCLI's IP on the shared default `bridge`
+network instead of the host gateway, so agents talk to OneCLI directly over the bridge
+and bypass the host firewall. The helper resolves the IP dynamically
+(`docker inspect onecli --format '{{.NetworkSettings.Networks.bridge.IPAddress}}'`),
+runs `docker network connect bridge onecli` if OneCLI isn't on the bridge yet, and
+falls back to `host-gateway` (with a warning) if it still can't resolve. Self-healing
+across reboots / container recreation.
 
-2. **Is the change opt-in capability that other users could plug in unchanged, given parameters?**
-   → **module.** Parameterize anything user-specific. Commit.
+**Re-apply check after an upstream update:**
+1. Confirm `hostGatewayArgs()` still maps to the OneCLI bridge IP (not plain `host-gateway`).
+2. From a running agent container:
+   `docker exec <c> getent hosts host.docker.internal` → should be OneCLI's bridge IP (e.g. `172.17.0.2`), not `172.17.0.1`.
+3. Send a real message; confirm no `API retry` spam and a reply is delivered.
 
-3. **Is the change required by every install for the system to function?**
-   → **core.** Commit.
+See memory `feedback_onecli_bridge` for full history.
 
-If you cannot answer cleanly, the change is probably mixing tiers — split it.
+---
 
-## Module rules
+## 2. Live status-line message disabled
 
-A module must be **drop-in for another user**. Concretely:
+- **File:** `src/modules/status-line/index.ts` → `STATUS_LINE_ENABLED = false`
+- **Tier:** instance (owner preference)
+- **Date:** 2026-06-21
 
-- No hardcoded project names, channel IDs, hostnames, or absolute paths.
-- Configuration values come from variables (template variables, environment, or a documented config file).
-- A module folder should include a short `README.md` or `MODULE.md` describing inputs, dependencies, and how to enable it.
-- If a module has no second consumer yet, that is fine — but write it as if it had one.
+**Why.** The status-line module posts a live channel message ("💭 작업 중…" /
+"🔧 Bash · N초") during a turn and deletes it at turn end. The owner finds it
+noisy, and the end-of-turn delete occasionally fails, leaving the message
+lingering. The native typing indicator already covers "is it alive?".
 
-## Instance rules
+**Fix.** `startStatusLine()` early-returns when disabled, so no status message is
+ever posted (nothing to leak). Flip `STATUS_LINE_ENABLED` to `true` to restore.
+Tests force-enable via `__testHooks.setEnabled(true)` to keep covering the live path.
 
-- Lives in an ignored path. The `.gitignore` patterns are scoped (`ops/**/instances/`, `ops/**/local/`, `groups/<personal>/`, `.env`, etc.) — not blanket. New instance areas must add a narrow `.gitignore` entry.
-- Never reference a single instance from a tracked file by name. Tracked files refer to instances through variables or through the host filesystem layout (e.g. install scripts that read `.env`).
-- An instance may include personal dashboards, overrides, alerting destinations, scheduling rules, ignored notes (`docs/plans/completed_plans/`), etc.
+**Re-apply check after an upstream update:** confirm `STATUS_LINE_ENABLED` is still
+`false` (upstream ships it `true` / always-on).
 
-## Tier mapping for current areas
+---
 
-| Path | Tier |
-|---|---|
-| `src/`, `container/`, `setup/` | core |
-| `.claude/skills/<name>/` (operational, utility, feature, container) | module |
-| `ops/observability-host/` (compose, prometheus, loki, promtail base, generic dashboards, generic provisioning) | core (infra) + future modules |
-| `ops/observability-host/instances/<name>/` (when added) | instance |
-| `groups/<name>/` (except `main/CLAUDE.md`, `global/CLAUDE.md`) | instance |
-| `.env`, `*.keys.json`, `.nanoclaw/` | instance |
-| `src/tone/example.ts` | module (template) |
-| `src/tone/<personal>.ts` (e.g. `ddonyang.ts`) | instance |
-| `docs/plans/completed_plans/` | instance (per-install work notes) |
+## 3. Docker socket passthrough for privileged groups (replay of v1)
 
-## Mechanical guard
+- **File:** `src/container-runner.ts` (after the volume-mount loop, before `--entrypoint`)
+- **Tier:** instance (host-specific: JH_Server #root needs host Docker control)
+- **Date:** 2026-07-01 (regression surfaced live after the v2 re-cutover)
 
-`scripts/check-boundaries.sh` (run via `npm run check:boundaries`) does a best-effort check for tier leakage in tracked files:
+**Problem.** v1's `container-runner.ts` had a Docker-socket passthrough block that v2
+never replayed. The `container.json` mounts that bind `/var/run/docker.sock` migrated
+fine (data), but the spawn-side code that makes the socket *usable* did not. v2 spawns
+the container as `--user ${hostUid}:${hostGid}` (here `1001:1001`) with no membership
+in the host `docker` group, so the non-root user can't open the `root:docker 0660`
+socket. Symptom (reported live by 재붕봇): "uid 1001, sock group 121 owned 0660,
+`DOCKER_HOST` 미주입" → all `docker` CLI calls inside the container hit EACCES. The
+`/model` restart (blocker-2 fix) merely cycled the container and surfaced it.
 
-- Tracked files inside any `instances/` or `local/` directory.
-- Long numeric IDs that look like Discord/Telegram channel/user IDs.
-- Hardcoded `/home/<user>/` absolute paths (placeholders `node`, `agent`, `user`, `you` are excluded).
-- Optional user-maintained blocklist at `.boundaries-blocklist` (gitignored) — one term per line, blank lines and `#` comments allowed.
+**Fix.** Port the v1 block verbatim: when a mount's basename is `docker.sock`, inject
+`DOCKER_HOST=unix://<containerPath>` and `--group-add <sockGid>` (gid from
+`fs.statSync(sock).gid` — `121` here) so the container user joins the host docker
+group. Adds **no mount of its own** — scope stays governed by which `container.json`
+carries the docker.sock mount (JH_Server #root + siblings only; never 붕붕이네, per
+memory `project_jh_server_privileged`).
 
-Lines containing the literal token `boundary-allow` (in a comment) are exempt — use it for intentional public IDs, illustrative examples, or test fixtures.
+**Re-apply check after an upstream update:**
+1. Confirm the `docker.sock` block still exists in `container-runner.ts` after the
+   mount loop (upstream ships neither the mount nor this block).
+2. From a freshly spawned #root container:
+   `docker inspect <c> --format '{{.HostConfig.GroupAdd}}'` → contains `121`, and
+   `{{range .Config.Env}}` includes `DOCKER_HOST=unix:///var/run/docker.sock`.
+3. `docker exec <c> docker ps` → succeeds (no EACCES).
 
-### Baseline
+See memory `project_jh_server_privileged`.
 
-The check compares findings against `.boundaries-baseline` (tracked). It exits 1 only on findings **not** in the baseline. This makes the gate enforceable today without requiring a one-shot cleanup of pre-existing leaks.
+---
 
-- `npm run check:boundaries` — fail on new leaks vs baseline.
-- `npm run check:boundaries -- --update-baseline` — regenerate the baseline after a legitimate cleanup. Commit the resulting `.boundaries-baseline` so the new state becomes the floor.
+## Known bug — NOT yet fixed (deferred)
 
-The baseline should shrink over time, never grow as a way to silence new violations. If you must add to the baseline, add the underlying leak as a TODO and document why.
-
-The script is **not** a pre-commit hook by default. Run it manually or in CI before publishing.
-
-## When in doubt
-
-- Lean toward **instance** if the file would embarrass another user who cloned the repo.
-- Lean toward **module** if you can imagine a second consumer.
-- Lean toward **core** only if removing the file would break the base install.
-
-## Migration policy
-
-Restructure existing code into `core/modules/instances/` layout **only when a second module candidate appears in that area**. Do not preemptively split. The harness defines the destination, not a migration deadline.
+**`send_file` / `send_message` falsely report success on delivery failure.**
+The container's MCP tools return `ok()` the moment they write to `outbound.db`
+(`container/agent-runner/src/mcp-tools/core.ts`). Actual platform delivery is async
+on the host; any failure (e.g. Discord `413 Request entity too large` for files over
+the upload limit, network errors) is retried 3× then dropped — and **never fed back
+to the container**, so the agent keeps telling the user "sent!" when nothing arrived.
+Acute for files (size limits are common). Proper fix: feed host delivery failures
+back as an inbound system message so the agent learns the send failed. Evidence:
+`logs/nanoclaw.error.log` 2026-06-21 20:17, msg-1782040642257 (40MB PDF → 413).

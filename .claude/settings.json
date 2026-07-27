@@ -1,13 +1,5 @@
 {
   "sandbox": {
-    "network": {
-      "allowedDomains": [
-        "npm.registry.com",
-        "us.i.posthog.com"
-      ]
-    }
-  },
-  "enabledPlugins": {
-    "codex@openai-codex": true
+    "enabled": false
   }
 }

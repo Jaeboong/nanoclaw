@@ -1,19 +1,26 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
+// bun:test has no vi.stubEnv/unstubAllEnvs — save/restore DART_API_KEY manually.
+const ORIG_KEY = process.env.DART_API_KEY;
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllEnvs();
+  if (ORIG_KEY === undefined) delete process.env.DART_API_KEY;
+  else process.env.DART_API_KEY = ORIG_KEY;
 });
 
 describe('dart-tool CLI', () => {
   it('exits without exposing secrets when DART_API_KEY is missing', async () => {
-    vi.stubEnv('DART_API_KEY', '');
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(process, 'exit').mockImplementation((code: string | number | null | undefined) => {
+    process.env.DART_API_KEY = '';
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`exit ${code}`);
-    });
+    }) as never);
 
-    await expect(import('./dart-cli.js')).rejects.toThrow('exit 2');
-    expect(errorSpy).toHaveBeenCalledWith('DART_API_KEY is not set');
+    try {
+      await expect(import('./dart-cli.js')).rejects.toThrow('exit 2');
+      expect(errorSpy).toHaveBeenCalledWith('DART_API_KEY is not set');
+    } finally {
+      errorSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
   });
 });

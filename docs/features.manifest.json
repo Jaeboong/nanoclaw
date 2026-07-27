@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Registry of this fork's custom features carried on top of an upstream base. One entry per feature. On every upstream catch-up, re-evaluate each entry: does upstream now provide this natively? Update `disposition` accordingly. Field meanings: tier = boundary tier (docs/HARNESS.md); commits = fork commits that introduced it; key_files = primary source it lives in; rides_seam = the upstream registry/hook it attaches to (or 'none' if novel/self-contained); upstream_equivalent = path to an upstream feature that supersedes it, or null; disposition = REPLAY (re-land as-is) | RE-DERIVE (seam moved/converged, re-express module body on new structure) | DROP (upstream fully supersedes) | DROP-ELIGIBLE (upstream has an adjacent feature; keep for now, candidate to retire); reapply_recipe = one-line how-to on replay.",
+  "reference_catchup": {
+    "fork_base": "v2.0.71",
+    "upstream_target": "v2.1.17",
+    "method": "rebase --onto (replay)",
+    "notes": "Dependency reconcile in this catch-up: @chat-adapter/discord 4.26 -> 4.29 to track chat@4.29. Boundary gate (scripts/check-boundaries.sh + .boundaries-baseline + package.json check:boundaries alias) is fork-maintained and was NOT present in the v2 tree after replay — re-carry it."
+  },
+  "features": [
+    {
+      "id": "collab-responder",
+      "title": "Collab + responder module (multi-agent turn-taking on a shared channel)",
+      "tier": "module",
+      "commits": ["b58ac441", "a652a3ee", "71113b76", "3161da73", "29db8919"],
+      "key_files": ["src/modules/collab/*"],
+      "rides_seam": "registerMessageInterceptor (upstream converged to a native seam of this shape) + registerOutboundObserver (fork-only seam)",
+      "upstream_equivalent": null,
+      "disposition": "RE-DERIVE",
+      "reapply_recipe": "Router seam converged to upstream's native registerMessageInterceptor; re-point the module's interceptor registration at the native seam and keep the module body (turn-taking/responder logic) unchanged. State (collab_sessions, responder_state) moved to DB keyed by messaging_group_id; its migration (collab-state) rides after the messaging-group migration in the array."
+    },
+    {
+      "id": "status-line",
+      "title": "Status-line module (surfaces current tool activity)",
+      "tier": "module",
+      "instance_state": "disabled on this instance (see INSTANCE-B)",
+      "commits": ["4314e668"],
+      "key_files": ["src/modules/status-line/*"],
+      "rides_seam": "current_tool",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land module as-is. Confirm the current_tool hook still exists upstream. The instance-side disable flag is an INSTANCE patch, reapplied separately from the stash."
+    },
+    {
+      "id": "discord-section-embeds-cjk-tables",
+      "title": "Discord section-embeds (colored sections) + CJK-safe table -> PNG rendering",
+      "tier": "module",
+      "commits": ["c7a039a3", "069104d0", "c28b36a3"],
+      "key_files": ["src/channels/discord-features/*"],
+      "rides_seam": "deliverRichMessage / transformOutboundMessage (fork-only outbound seams)",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land module + its fork-only outbound seams. Table->PNG path depends on @napi-rs/canvas (optional/native dep) and container CJK fonts (see replay-container-base). Verify section rendering live after cutover."
+    },
+    {
+      "id": "agent-activity-panel",
+      "title": "Agent-activity /agents interactive panel",
+      "tier": "module",
+      "commits": ["57d052a5", "cbde2f43"],
+      "key_files": ["src/modules/agent-activity/*"],
+      "rides_seam": "component-handler seam (interactive component dispatch)",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land module. First consumer of the component-handler seam; if upstream restructures interactive dispatch, re-point registration and keep panel render/snapshot logic."
+    },
+    {
+      "id": "compact-everywhere",
+      "title": "/compact-everywhere slash command for engage-gated sub-channels",
+      "tier": "module",
+      "commits": ["521d5359", "0e2b69ef", "f060ea77"],
+      "key_files": ["src/modules/compact-everywhere/*"],
+      "rides_seam": "slash-command registry",
+      "upstream_equivalent": "upstream typed /compact",
+      "disposition": "DROP-ELIGIBLE",
+      "reapply_recipe": "Upstream ships a typed /compact; ours is the slash form scoped to engage-gated sub-channels. Keep only while the sub-channel gating gap remains; retire once upstream /compact covers those channels."
+    },
+    {
+      "id": "background-spawn-subagent",
+      "title": "Background spawn_subagent (ephemeral fire-and-forget worker)",
+      "tier": "module",
+      "commits": ["121025bf", "cd70370f"],
+      "key_files": ["src/modules/background-spawn/*"],
+      "rides_seam": "task/subagent spawn path",
+      "upstream_equivalent": "upstream agent-to-agent (adjacent, not identical)",
+      "disposition": "DROP-ELIGIBLE",
+      "reapply_recipe": "Distinct ephemeral-worker pattern adjacent to upstream's agent-to-agent. Keep while the ephemeral (no messaging-group) worker shape is unmet upstream; re-evaluate each release."
+    },
+    {
+      "id": "model-effort-commands",
+      "title": "/model + /effort commands",
+      "tier": "module",
+      "commits": ["67707005"],
+      "key_files": ["src/modules/*"],
+      "rides_seam": "container_configs (writes upstream-native model/effort scalars)",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land. Writes the upstream-native container_configs model/effort scalar columns via updateContainerConfigScalars — confirm those columns/API still exist upstream before trusting the write."
+    },
+    {
+      "id": "slash-interaction-framework",
+      "title": "Slash + interaction framework",
+      "tier": "module",
+      "commits": ["48170106"],
+      "key_files": ["src/modules/interactive/*"],
+      "rides_seam": "none (novel framework)",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land. Exports isAdmin, which is private in upstream; if upstream promotes/renames an equivalent, switch to it, otherwise keep the fork export. Underpins several other modules (compact-everywhere, agent-activity, model/effort) — replay before them."
+    },
+    {
+      "id": "nano-umask-dart-wrapper",
+      "title": "NANO_UMASK + dart-tool wrapper (container-runner additive)",
+      "tier": "module",
+      "commits": ["af6b03f7"],
+      "key_files": ["src/container-runner.ts"],
+      "rides_seam": "container-runner (additive, no core branching)",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land additive container-runner changes. Note container-runner.ts is also the site of INSTANCE-C (docker.sock) — keep the module (umask/wrapper) edit separate from the instance patch."
+    },
+    {
+      "id": "dart-opendart-mcp",
+      "title": "DART OpenDART MCP tool",
+      "tier": "module",
+      "commits": ["2084d0a8"],
+      "key_files": ["container/skills/*", "src/modules/*"],
+      "rides_seam": "MCP tool registration",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land the MCP tool. Credentials for the external API stay instance/OneCLI-managed, never committed."
+    },
+    {
+      "id": "discord-adapter-install",
+      "title": "Discord adapter install",
+      "tier": "module",
+      "commits": ["929d9363"],
+      "key_files": ["package.json", "src/channels/*"],
+      "rides_seam": "channel-adapter registry",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land. This is the @chat-adapter/discord dependency + wiring; keep the adapter version tracking the core `chat` package minor (see reference_catchup dependency reconcile)."
+    },
+    {
+      "id": "replay-container-base",
+      "title": "Replay container base image (fonts / jira / apt / CJK support)",
+      "tier": "module",
+      "commits": ["4a9d8ff8"],
+      "key_files": ["container/*"],
+      "rides_seam": "container build (Dockerfile layers)",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Re-land container base additions (CJK fonts back the discord table->PNG feature). Rebuild the container image after replay; prune the builder cache first (stale COPY layers)."
+    },
+    {
+      "id": "instance-patches",
+      "title": "INSTANCE patches (uncommitted, host-only)",
+      "tier": "instance",
+      "commits": [],
+      "key_files": ["src/container-runtime.ts", "src/container-runner.ts"],
+      "rides_seam": "none",
+      "upstream_equivalent": null,
+      "disposition": "REPLAY",
+      "reapply_recipe": "Never committed; reapplied from a host stash after the merged build is in place (UPGRADING.md §5). Three checks: INSTANCE-A OneCLI bridge address (src/container-runtime.ts), INSTANCE-B status-line disabled flag, INSTANCE-C docker.sock passthrough (src/container-runner.ts). All are instance-tier per docs/HARNESS.md — verify present + correct for THIS host, keep out of git."
+    }
+  ]
+}
